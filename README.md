@@ -16,7 +16,7 @@
   limitations under the License.
 -->
 
-# Apache Hudi
+# Apache Hudi Internal
 
 Apache Hudi (pronounced Hoodie) stands for `Hadoop Upserts Deletes and Incrementals`. Hudi manages the storage of large
 analytical datasets on DFS (Cloud stores, HDFS or any Hadoop FileSystem compatible storage).
@@ -32,6 +32,52 @@ analytical datasets on DFS (Cloud stores, HDFS or any Hadoop FileSystem compatib
 ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/apache/hudi)
 [![Join on Slack](https://img.shields.io/badge/slack-%23hudi-72eff8?logo=slack&color=48c628&label=Join%20on%20Slack)](https://join.slack.com/t/apache-hudi/shared_invite/zt-1e94d3xro-JvlNO1kSeIHJBTVfLPlI5w)
 ![Twitter Follow](https://img.shields.io/twitter/follow/ApacheHudi)
+
+## hudi-internal PR Process
+
+This repo serves as the internal mirror of Apache Hudi OSS with the latest fixes for cutting internal Hudi releases.
+Any proprietary code should be committed [onehouse-dataplane repo](https://github.com/onehouseinc/onehouse-dataplane)
+instead.
+
+In the case of a new proprietary feature that requires changing Hudi abstraction and APIs, e.g., add new source or
+plugged-in functionality in write client, you should break the code changes into two part: (1) API changes, such as
+method signature changes or new public interface and abstract class, only in Hudi, which is merged in Hudi OSS and this
+repo, (2) actual implementation in [onehouse-dataplane repo](https://github.com/onehouseinc/onehouse-dataplane). One
+example is the feature Onehouse added as a proprietary one: Snapshot load query split by considering row limit, which
+is split into two (1) `SnapshotLoadQuerySplitter`: an abstract class with the APIs in Hudi,
+(2) `SnapshotLoadQuerySplitterByRowLimit`: an implementation of `SnapshotLoadQuerySplitter` class
+in `onehouse-dataplane`.
+
+Here is the process for creating a `hudi-internal` PR. All PRs must have clickup task ID mentioned at the start in PR
+title, i.e., `[AUDIT-<ID>]`, `[ONHS-<ID>]`, or `[ENG-<ID>]`. There are four case for PR title check:
+
+- **Feature development and bug fixes**: create [Hudi JIRA](https://issues.apache.org/jira/projects/HUDI/issues),
+  create a [Hudi OSS](https://github.com/apache/hudi) PR, get reviews and approval, and then cherry-pick the same
+  changes into `hudi-internal` with the PR title included and OSS PR link `apache/hudi#<pr_id>` (or
+  URL, `https://github.com/apache/hudi/pull/<pr_id>`) mentioned in the PR description (this is enforced by PR compliance
+  check).
+  - For example, for OSS PR, https://github.com/apache/hudi/pull/10923, with title
+    `[HUDI-7531] Consider pending clustering when scheduling a new clustering plan`, the internal PR should be titled
+    `[ENG-8056][HUDI-7531] Consider pending clustering when scheduling a new clustering plan`, with the Clickup task ID
+    at the beginning and the exact title content as OSS PR subsequently.
+- **Urgent feature and hotfix**: for urgent feature and hotfix for outage mitigation,
+  create [Hudi JIRA](https://issues.apache.org/jira/projects/HUDI/issues), create a
+  placeholder [Hudi OSS](https://github.com/apache/hudi) PR, then in parallel create a `hudi-internal` PR of the
+  hotfix with the PR title included and OSS PR link `apache/hudi#<pr_id>` (or URL,
+  `https://github.com/apache/hudi/pull/<pr_id>`) mentioned in the PR description (this is
+  enforced by PR compliance check). This is to make sure we always remember to upstream the hotfix later on. In such a
+  case, [Hudi Committers](https://github.com/orgs/onehouseinc/teams/hudi-committers) are responsible for reviewing and
+  approving the `hudi-internal` PR by holding the same standard as Hudi OSS PR review and approval (e.g., backwards
+  compatibility, extreme care around public interface changes and format changes, test coverage, etc.).
+  - For example, you may follow the same convention as **Feature development and bug fixes** above.
+  - As another example, you may have the PR tile as `[ENG-7807][INTERNAL] Hotfix` if the fix is intended for internal
+    temporary hotfix.
+- **Release cut**: create AUDIT ticket and PR with the AUDIT ticket in the title (e.g.,
+  `[AUDIT-689] Upgrade to release`), by
+  following [Dataplane Rollout Process](https://app.clickup.com/18029943/v/dc/h67bq-25107/h67bq-72820)
+- **Other cases**: in the cases of internal or cherrypick PRs, add `[INTERNAL]` or `[CHERRYPICK]` to the PR title.
+  - For example:
+    `[ENG-1234][INTERNAL] Internal tooling changes`, `[ENG-5678][CHERRYPICK] Cherrypick community OSS changes`, etc.
 
 ## Features
 
@@ -88,7 +134,7 @@ The default Spark 2.x version supported is 2.4.4. The default Spark 3.x version,
 3.4.0. The default Scala version is 2.12. Refer to the table below for building with different Spark and Scala versions.
 
 | Maven build options       | Expected Spark bundle jar name               | Notes                                            |
-|:--------------------------|:---------------------------------------------|:-------------------------------------------------|
+| :------------------------ | :------------------------------------------- | :----------------------------------------------- |
 | (empty)                   | hudi-spark3.2-bundle_2.12                    | For Spark 3.2.x and Scala 2.12 (default options) |
 | `-Dspark2.4 -Dscala-2.11` | hudi-spark2.4-bundle_2.11                    | For Spark 2.4.4 and Scala 2.11                   |
 | `-Dspark3.0`              | hudi-spark3.0-bundle_2.12                    | For Spark 3.0.x and Scala 2.12                   |
@@ -123,7 +169,7 @@ Flink is Scala-free since 1.15.x, there is no need to specify the Scala version 
 Refer to the table below for building with different Flink and Scala versions.
 
 | Maven build options        | Expected Flink bundle jar name | Notes                            |
-|:---------------------------|:-------------------------------|:---------------------------------|
+| :------------------------- | :----------------------------- | :------------------------------- |
 | (empty)                    | hudi-flink1.17-bundle          | For Flink 1.17 (default options) |
 | `-Dflink1.17`              | hudi-flink1.17-bundle          | For Flink 1.17 (same as default) |
 | `-Dflink1.16`              | hudi-flink1.16-bundle          | For Flink 1.16                   |

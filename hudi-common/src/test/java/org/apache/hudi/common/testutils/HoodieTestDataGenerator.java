@@ -59,6 +59,8 @@ import java.io.Serializable;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -66,6 +68,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -89,6 +92,13 @@ import static org.apache.hudi.common.util.ValidationUtils.checkState;
  * Test data uses a toy Uber trips, data model.
  */
 public class HoodieTestDataGenerator implements AutoCloseable {
+
+  /**
+   * You may get a different result due to the upgrading of Spark 3.0: reading dates before 1582-10-15 or timestamps before 1900-01-01T00:00:00Z from Parquet INT96 files can be ambiguous,
+   * as the files may be written by Spark 2.x or legacy versions of Hive, which uses a legacy hybrid calendar that is different from Spark 3.0+s Proleptic Gregorian calendar.
+   * See more details in SPARK-31404.
+   */
+  private boolean makeDatesAmbiguous = false;
 
   // based on examination of sample file, the schema produces the following per record size
   public static final int BYTES_PER_RECORD = (int) (1.2 * 1024);
@@ -139,7 +149,12 @@ public class HoodieTestDataGenerator implements AutoCloseable {
 
   public static final String TRIP_NESTED_EXAMPLE_SCHEMA =
       TRIP_SCHEMA_PREFIX + FARE_NESTED_SCHEMA + TRIP_SCHEMA_SUFFIX;
-
+  public static final String TRIP_ENCODED_DECIMAL_SCHEMA = "{\"type\":\"record\",\"name\":\"tripUberRec\",\"fields\":["
+      + "{\"name\":\"timestamp\",\"type\":\"long\"},{\"name\":\"_row_key\",\"type\":\"string\"},{\"name\":\"rider\",\"type\":\"string\"},"
+      + "{\"name\":\"decfield\",\"type\":{\"type\":\"bytes\",\"name\":\"abc\",\"logicalType\":\"decimal\",\"precision\":10,\"scale\":6}},"
+      + "{\"name\":\"lowprecision\",\"type\":{\"type\":\"bytes\",\"name\":\"def\",\"logicalType\":\"decimal\",\"precision\":4,\"scale\":2}},"
+      + "{\"name\":\"highprecision\",\"type\":{\"type\":\"bytes\",\"name\":\"ghi\",\"logicalType\":\"decimal\",\"precision\":32,\"scale\":12}},"
+      + "{\"name\":\"driver\",\"type\":\"string\"},{\"name\":\"fare\",\"type\":\"double\"},{\"name\": \"_hoodie_is_deleted\", \"type\": \"boolean\", \"default\": false}]}";
   public static final String TRIP_SCHEMA = "{\"type\":\"record\",\"name\":\"tripUberRec\",\"fields\":["
       + "{\"name\":\"timestamp\",\"type\":\"long\"},{\"name\":\"_row_key\",\"type\":\"string\"},{\"name\":\"rider\",\"type\":\"string\"},"
       + "{\"name\":\"driver\",\"type\":\"string\"},{\"name\":\"fare\",\"type\":\"double\"},{\"name\": \"_hoodie_is_deleted\", \"type\": \"boolean\", \"default\": false}]}";
@@ -158,6 +173,7 @@ public class HoodieTestDataGenerator implements AutoCloseable {
   public static final Schema AVRO_SCHEMA_WITH_METADATA_FIELDS =
       HoodieAvroUtils.addMetadataFields(AVRO_SCHEMA);
   public static final Schema AVRO_SHORT_TRIP_SCHEMA = new Schema.Parser().parse(SHORT_TRIP_SCHEMA);
+  public static final Schema AVRO_TRIP_ENCODED_DECIMAL_SCHEMA = new Schema.Parser().parse(TRIP_ENCODED_DECIMAL_SCHEMA);
   public static final Schema AVRO_TRIP_SCHEMA = new Schema.Parser().parse(TRIP_SCHEMA);
   public static final TypeDescription ORC_TRIP_SCHEMA = AvroOrcUtils.createOrcSchema(new Schema.Parser().parse(TRIP_SCHEMA));
   public static final Schema FLATTENED_AVRO_SCHEMA = new Schema.Parser().parse(TRIP_FLATTENED_SCHEMA);
@@ -205,6 +221,23 @@ public class HoodieTestDataGenerator implements AutoCloseable {
   @Deprecated
   public HoodieTestDataGenerator() {
     this(DEFAULT_PARTITION_PATHS);
+  }
+
+  public static HoodieTestDataGenerator createTestGeneratorFirstPartition() {
+    return new HoodieTestDataGenerator(new String[]{DEFAULT_FIRST_PARTITION_PATH});
+  }
+
+  public static HoodieTestDataGenerator createTestGeneratorSecondPartition() {
+    return new HoodieTestDataGenerator(new String[]{DEFAULT_SECOND_PARTITION_PATH});
+  }
+
+  public static HoodieTestDataGenerator createTestGeneratorThirdPartition() {
+    return new HoodieTestDataGenerator(new String[]{DEFAULT_THIRD_PARTITION_PATH});
+  }
+
+  public HoodieTestDataGenerator(boolean makeDatesAmbiguous) {
+    this();
+    this.makeDatesAmbiguous = makeDatesAmbiguous;
   }
 
   @Deprecated
@@ -260,6 +293,8 @@ public class HoodieTestDataGenerator implements AutoCloseable {
   public RawTripTestPayload generateRandomValueAsPerSchema(String schemaStr, HoodieKey key, String commitTime, boolean isFlattened) throws IOException {
     if (TRIP_EXAMPLE_SCHEMA.equals(schemaStr)) {
       return generateRandomValue(key, commitTime, isFlattened);
+    } else if (TRIP_ENCODED_DECIMAL_SCHEMA.equals(schemaStr)) {
+      return generatePayloadForTripEncodedDecimalSchema(key, commitTime);
     } else if (TRIP_SCHEMA.equals(schemaStr)) {
       return generatePayloadForTripSchema(key, commitTime);
     } else if (SHORT_TRIP_SCHEMA.equals(schemaStr)) {
@@ -320,6 +355,14 @@ public class HoodieTestDataGenerator implements AutoCloseable {
   }
 
   /**
+   * Generates a new avro record with TRIP_ENCODED_DECIMAL_SCHEMA, retaining the key if optionally provided.
+   */
+  public RawTripTestPayload generatePayloadForTripEncodedDecimalSchema(HoodieKey key, String commitTime) throws IOException {
+    GenericRecord rec = generateRecordForTripEncodedDecimalSchema(key.getRecordKey(), "rider-" + commitTime, "driver-" + commitTime, 0);
+    return new RawTripTestPayload(rec.toString(), key.getRecordKey(), key.getPartitionPath(), TRIP_ENCODED_DECIMAL_SCHEMA);
+  }
+
+  /**
    * Generates a new avro record with TRIP_SCHEMA, retaining the key if optionally provided.
    */
   public RawTripTestPayload generatePayloadForTripSchema(HoodieKey key, String commitTime) throws IOException {
@@ -353,7 +396,6 @@ public class HoodieTestDataGenerator implements AutoCloseable {
                                              long timestamp) {
     return generateGenericRecord(rowKey, partitionPath, riderName, driverName, timestamp, false, false);
   }
-
 
   /**
    * Populate rec with values for TRIP_SCHEMA_PREFIX
@@ -391,7 +433,8 @@ public class HoodieTestDataGenerator implements AutoCloseable {
     rec.put("nation", ByteBuffer.wrap(bytes));
     long randomMillis = genRandomTimeMillis(rand);
     Instant instant = Instant.ofEpochMilli(randomMillis);
-    rec.put("current_date", (int) LocalDateTime.ofInstant(instant, ZoneOffset.UTC).toLocalDate().toEpochDay());
+    rec.put("current_date", makeDatesAmbiguous ? -1000000 :
+        (int) LocalDateTime.ofInstant(instant, ZoneOffset.UTC).toLocalDate().toEpochDay());
     rec.put("current_ts", randomMillis);
 
     BigDecimal bigDecimal = new BigDecimal(String.format(Locale.ENGLISH, "%5f", rand.nextFloat()));
@@ -441,8 +484,7 @@ public class HoodieTestDataGenerator implements AutoCloseable {
       rec.put("_hoodie_is_deleted", false);
     }
   }
-
-
+  
   /**
    * Generate record conforming to TRIP_EXAMPLE_SCHEMA or TRIP_FLATTENED_SCHEMA if isFlattened is true
    */
@@ -473,6 +515,37 @@ public class HoodieTestDataGenerator implements AutoCloseable {
     generateFareNestedValues(rec);
     generateTripSuffixValues(rec, isDeleteRecord);
     return rec;
+  }
+
+  /*
+Generate random record using TRIP_ENCODED_DECIMAL_SCHEMA
+ */
+  public GenericRecord generateRecordForTripEncodedDecimalSchema(String rowKey, String riderName, String driverName, long timestamp) {
+    GenericRecord rec = new GenericData.Record(AVRO_TRIP_ENCODED_DECIMAL_SCHEMA);
+    rec.put("_row_key", rowKey);
+    rec.put("timestamp", timestamp);
+    rec.put("rider", riderName);
+    rec.put("decfield", getNonzeroEncodedBigDecimal(rand, 6, 10));
+    rec.put("lowprecision", getNonzeroEncodedBigDecimal(rand, 2, 4));
+    rec.put("highprecision", getNonzeroEncodedBigDecimal(rand, 12, 32));
+    rec.put("driver", driverName);
+    rec.put("fare", rand.nextDouble() * 100);
+    rec.put("_hoodie_is_deleted", false);
+    return rec;
+  }
+
+  private static String getNonzeroEncodedBigDecimal(Random rand, int scale, int precision) {
+    //scale the value because rand.nextDouble() only returns a val that is between 0 and 1
+
+    //make it between 0.1 and 1 so that we keep all values in the same order of magnitude
+    double nextDouble = rand.nextDouble();
+    while (nextDouble <= 0.1) {
+      nextDouble = rand.nextDouble();
+    }
+    double valuescale = Math.pow(10, precision - scale);
+    BigDecimal dec = BigDecimal.valueOf(nextDouble * valuescale)
+        .setScale(scale, RoundingMode.HALF_UP).round(new MathContext(precision, RoundingMode.HALF_UP));
+    return Base64.getEncoder().encodeToString(dec.unscaledValue().toByteArray());
   }
 
   /*

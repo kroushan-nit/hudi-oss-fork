@@ -70,6 +70,8 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.spark.SparkConf;
+import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.SQLContext;
@@ -192,9 +194,11 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
     }
 
     // Initialize a local spark env
-    jsc = new JavaSparkContext(HoodieClientTestUtils.getSparkConfForTest(appName + "#" + testMethodName));
+    SparkConf sc = HoodieClientTestUtils.getSparkConfForTest(appName + "#" + testMethodName);
+    SparkContext sparkContext = new SparkContext(sc);
+    HoodieClientTestUtils.overrideSparkHadoopConfiguration(sparkContext);
+    jsc = new JavaSparkContext(sparkContext);
     jsc.setLogLevel("ERROR");
-
     hadoopConf = jsc.hadoopConfiguration();
 
     sparkSession = SparkSession.builder()
@@ -622,7 +626,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
     // Metadata table should automatically compact and clean
     // versions are +1 as autoClean / compaction happens end of commits
     int numFileVersions = metadataWriteConfig.getCleanerFileVersionsRetained() + 1;
-    HoodieTableFileSystemView fsView = new HoodieTableFileSystemView(metadataMetaClient, metadataMetaClient.getActiveTimeline());
+    HoodieTableFileSystemView fsView = HoodieTableFileSystemView.fileListingBasedFileSystemView(context, metadataMetaClient, metadataMetaClient.getActiveTimeline());
     metadataTablePartitions.forEach(partition -> {
       MetadataPartitionType partitionType = partitionTypeMap.get(partition);
 
@@ -645,7 +649,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
 
   public HoodieInstant createCleanMetadata(String instantTime, boolean inflightOnly, boolean isEmptyForAll, boolean isEmptyCompleted) throws IOException {
     HoodieCleanerPlan cleanerPlan = new HoodieCleanerPlan(new HoodieActionInstant("", "", ""), "", "",
-            new HashMap<>(), CleanPlanV2MigrationHandler.VERSION, new HashMap<>(), new ArrayList<>());
+            new HashMap<>(), CleanPlanV2MigrationHandler.VERSION, new HashMap<>(), new ArrayList<>(), Collections.EMPTY_MAP);
     if (inflightOnly) {
       HoodieTestTable.of(metaClient).addInflightClean(instantTime, cleanerPlan);
     } else {
@@ -657,7 +661,7 @@ public abstract class HoodieSparkClientTestHarness extends HoodieWriterClientTes
               Collections.emptyList(),
               instantTime,
               "");
-      HoodieCleanMetadata cleanMetadata = convertCleanMetadata(instantTime, Option.of(0L), Collections.singletonList(cleanStats));
+      HoodieCleanMetadata cleanMetadata = convertCleanMetadata(instantTime, Option.of(0L), Collections.singletonList(cleanStats), Collections.EMPTY_MAP);
       HoodieTestTable.of(metaClient).addClean(instantTime, cleanerPlan, cleanMetadata, isEmptyForAll, isEmptyCompleted);
     }
     return new HoodieInstant(inflightOnly, "clean", instantTime);

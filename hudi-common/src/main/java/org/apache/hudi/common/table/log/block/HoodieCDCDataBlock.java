@@ -27,6 +27,7 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Change log supplemental log data block.
@@ -34,21 +35,22 @@ import java.util.Map;
 public class HoodieCDCDataBlock extends HoodieAvroDataBlock {
 
   public HoodieCDCDataBlock(
-      FSDataInputStream inputStream,
+      Supplier<FSDataInputStream> inputStreamSupplier,
       Option<byte[]> content,
       boolean readBlockLazily,
       HoodieLogBlockContentLocation logBlockContentLocation,
       Schema readerSchema,
       Map<HeaderMetadataType, String> header,
       String keyField) {
-    super(inputStream, content, readBlockLazily, logBlockContentLocation,
+    super(inputStreamSupplier, content, readBlockLazily, logBlockContentLocation,
         Option.of(readerSchema), header, new HashMap<>(), keyField);
   }
 
   public HoodieCDCDataBlock(List<HoodieRecord> records,
                             Map<HeaderMetadataType, String> header,
-                            String keyField) {
-    super(records, header, keyField);
+                            String keyField,
+                            int logBlockVersionToWrite) {
+    super(records, header, keyField, logBlockVersionToWrite);
   }
 
   @Override

@@ -252,60 +252,61 @@ public class TestHoodieMergeOnReadTable extends SparkClientFunctionalTestHarness
       // Write them to corresponding avro logfiles
       metaClient = HoodieTableMetaClient.reload(metaClient);
 
-      HoodieTableMetadataWriter metadataWriter = SparkHoodieBackedTableMetadataWriter.create(
-          writeClient.getEngineContext().getHadoopConf().get(), config, writeClient.getEngineContext());
-      HoodieSparkWriteableTestTable testTable = HoodieSparkWriteableTestTable
-          .of(metaClient, HoodieTestDataGenerator.AVRO_SCHEMA_WITH_METADATA_FIELDS, metadataWriter);
+      try (HoodieTableMetadataWriter metadataWriter = SparkHoodieBackedTableMetadataWriter.create(
+          writeClient.getEngineContext().getHadoopConf().get(), config, writeClient.getEngineContext())) {
+        HoodieSparkWriteableTestTable testTable = HoodieSparkWriteableTestTable
+            .of(metaClient, HoodieTestDataGenerator.AVRO_SCHEMA_WITH_METADATA_FIELDS, metadataWriter);
 
-      Set<String> allPartitions = updatedRecords.stream()
-          .map(record -> record.getPartitionPath())
-          .collect(Collectors.groupingBy(partitionPath -> partitionPath))
-          .keySet();
-      assertEquals(allPartitions.size(), testTable.listAllBaseFiles().length);
+        Set<String> allPartitions = updatedRecords.stream()
+            .map(record -> record.getPartitionPath())
+            .collect(Collectors.groupingBy(partitionPath -> partitionPath))
+            .keySet();
+        assertEquals(allPartitions.size(), testTable.listAllBaseFiles().length);
 
-      // Verify that all data file has one log file
-      HoodieTable table = HoodieSparkTable.create(config, context(), metaClient);
-      for (String partitionPath : dataGen.getPartitionPaths()) {
-        List<FileSlice> groupedLogFiles =
-            table.getSliceView().getLatestFileSlices(partitionPath).collect(Collectors.toList());
-        for (FileSlice fileSlice : groupedLogFiles) {
-          assertEquals(1, fileSlice.getLogFiles().count(),
-              "There should be 1 log file written for the latest data file - " + fileSlice);
+        // Verify that all data file has one log file
+        HoodieTable table = HoodieSparkTable.create(config, context(), metaClient);
+        for (String partitionPath : dataGen.getPartitionPaths()) {
+          List<FileSlice> groupedLogFiles =
+              table.getSliceView().getLatestFileSlices(partitionPath).collect(Collectors.toList());
+          for (FileSlice fileSlice : groupedLogFiles) {
+            assertEquals(1, fileSlice.getLogFiles().count(),
+                "There should be 1 log file written for the latest data file - " + fileSlice);
+          }
         }
-      }
 
-      // Do a compaction
-      String compactionInstantTime = writeClient.scheduleCompaction(Option.empty()).get().toString();
-      HoodieWriteMetadata<JavaRDD<WriteStatus>> result = writeClient.compact(compactionInstantTime);
+        // Do a compaction
+        String compactionInstantTime = writeClient.scheduleCompaction(Option.empty()).get().toString();
+        HoodieWriteMetadata<JavaRDD<WriteStatus>> result = writeClient.compact(compactionInstantTime);
 
-      // Verify that recently written compacted data file has no log file
-      metaClient = HoodieTableMetaClient.reload(metaClient);
-      table = HoodieSparkTable.create(config, context(), metaClient);
-      HoodieActiveTimeline timeline = metaClient.getActiveTimeline();
+        // Verify that recently written compacted data file has no log file
+        metaClient = HoodieTableMetaClient.reload(metaClient);
+        table = HoodieSparkTable.create(config, context(), metaClient);
+        HoodieActiveTimeline timeline = metaClient.getActiveTimeline();
 
-      assertTrue(HoodieTimeline
-              .compareTimestamps(timeline.lastInstant().get().getTimestamp(), HoodieTimeline.GREATER_THAN, newCommitTime),
-          "Compaction commit should be > than last insert");
+        assertTrue(HoodieTimeline
+                .compareTimestamps(timeline.lastInstant().get().getTimestamp(), HoodieTimeline.GREATER_THAN, newCommitTime),
+            "Compaction commit should be > than last insert");
 
-      for (String partitionPath : dataGen.getPartitionPaths()) {
-        List<FileSlice> groupedLogFiles =
-            table.getSliceView().getLatestFileSlices(partitionPath).collect(Collectors.toList());
-        for (FileSlice slice : groupedLogFiles) {
-          assertEquals(0, slice.getLogFiles().count(), "After compaction there should be no log files visible on a full view");
+        for (String partitionPath : dataGen.getPartitionPaths()) {
+          List<FileSlice> groupedLogFiles =
+              table.getSliceView().getLatestFileSlices(partitionPath).collect(Collectors.toList());
+          for (FileSlice slice : groupedLogFiles) {
+            assertEquals(0, slice.getLogFiles().count(), "After compaction there should be no log files visible on a full view");
+          }
+          assertTrue(result.getCommitMetadata().get().getWritePartitionPaths().stream().anyMatch(part -> part.contentEquals(partitionPath)));
         }
-        assertTrue(result.getCommitMetadata().get().getWritePartitionPaths().stream().anyMatch(part -> part.contentEquals(partitionPath)));
-      }
 
-      // Check the entire dataset has all records still
-      String[] fullPartitionPaths = new String[dataGen.getPartitionPaths().length];
-      for (int i = 0; i < fullPartitionPaths.length; i++) {
-        fullPartitionPaths[i] = String.format("%s/%s/*", basePath(), dataGen.getPartitionPaths()[i]);
-      }
-      Dataset<Row> actual = HoodieClientTestUtils.read(jsc(), basePath(), sqlContext(), fs(), fullPartitionPaths);
-      List<Row> rows = actual.collectAsList();
-      assertEquals(updatedRecords.size(), rows.size());
-      for (Row row : rows) {
-        assertEquals(row.getAs(HoodieRecord.COMMIT_TIME_METADATA_FIELD), newCommitTime);
+        // Check the entire dataset has all records still
+        String[] fullPartitionPaths = new String[dataGen.getPartitionPaths().length];
+        for (int i = 0; i < fullPartitionPaths.length; i++) {
+          fullPartitionPaths[i] = String.format("%s/%s/*", basePath(), dataGen.getPartitionPaths()[i]);
+        }
+        Dataset<Row> actual = HoodieClientTestUtils.read(jsc(), basePath(), sqlContext(), fs(), fullPartitionPaths);
+        List<Row> rows = actual.collectAsList();
+        assertEquals(updatedRecords.size(), rows.size());
+        for (Row row : rows) {
+          assertEquals(row.getAs(HoodieRecord.COMMIT_TIME_METADATA_FIELD), newCommitTime);
+        }
       }
     }
   }
@@ -360,50 +361,51 @@ public class TestHoodieMergeOnReadTable extends SparkClientFunctionalTestHarness
       // Write them to corresponding avro logfiles
       metaClient = HoodieTableMetaClient.reload(metaClient);
 
-      HoodieTableMetadataWriter metadataWriter = SparkHoodieBackedTableMetadataWriter.create(
-          writeClient.getEngineContext().getHadoopConf().get(), config, writeClient.getEngineContext());
-      HoodieSparkWriteableTestTable testTable = HoodieSparkWriteableTestTable
-          .of(metaClient, HoodieTestDataGenerator.AVRO_SCHEMA_WITH_METADATA_FIELDS, metadataWriter);
+      try (HoodieTableMetadataWriter metadataWriter = SparkHoodieBackedTableMetadataWriter.create(
+          writeClient.getEngineContext().getHadoopConf().get(), config, writeClient.getEngineContext())) {
+        HoodieSparkWriteableTestTable testTable = HoodieSparkWriteableTestTable
+            .of(metaClient, HoodieTestDataGenerator.AVRO_SCHEMA_WITH_METADATA_FIELDS, metadataWriter);
 
-      Set<String> allPartitions = updatedRecords.stream()
-          .map(record -> record.getPartitionPath())
-          .collect(Collectors.groupingBy(partitionPath -> partitionPath))
-          .keySet();
-      assertEquals(allPartitions.size(), testTable.listAllBaseFiles().length);
+        Set<String> allPartitions = updatedRecords.stream()
+            .map(record -> record.getPartitionPath())
+            .collect(Collectors.groupingBy(partitionPath -> partitionPath))
+            .keySet();
+        assertEquals(allPartitions.size(), testTable.listAllBaseFiles().length);
 
-      // Verify that all data file has one log file
-      HoodieTable table = HoodieSparkTable.create(config, context(), metaClient);
-      for (String partitionPath : dataGen.getPartitionPaths()) {
-        List<FileSlice> groupedLogFiles =
-            table.getSliceView().getLatestFileSlices(partitionPath).collect(Collectors.toList());
-        for (FileSlice fileSlice : groupedLogFiles) {
-          assertEquals(2, fileSlice.getLogFiles().count(),
-              "There should be 1 log file written for the latest data file - " + fileSlice);
+        // Verify that all data file has one log file
+        HoodieTable table = HoodieSparkTable.create(config, context(), metaClient);
+        for (String partitionPath : dataGen.getPartitionPaths()) {
+          List<FileSlice> groupedLogFiles =
+              table.getSliceView().getLatestFileSlices(partitionPath).collect(Collectors.toList());
+          for (FileSlice fileSlice : groupedLogFiles) {
+            assertEquals(2, fileSlice.getLogFiles().count(),
+                "There should be 1 log file written for the latest data file - " + fileSlice);
+          }
         }
-      }
 
-      // Do a log compaction
-      String logCompactionInstantTime = writeClient.scheduleLogCompaction(Option.empty()).get().toString();
-      HoodieWriteMetadata<JavaRDD<WriteStatus>> result = writeClient.logCompact(logCompactionInstantTime);
+        // Do a log compaction
+        String logCompactionInstantTime = writeClient.scheduleLogCompaction(Option.empty()).get().toString();
+        HoodieWriteMetadata<JavaRDD<WriteStatus>> result = writeClient.logCompact(logCompactionInstantTime);
 
-      // Verify that recently written compacted data file has no log file
-      metaClient = HoodieTableMetaClient.reload(metaClient);
-      table = HoodieSparkTable.create(config, context(), metaClient);
-      HoodieActiveTimeline timeline = metaClient.getActiveTimeline();
+        // Verify that recently written compacted data file has no log file
+        metaClient = HoodieTableMetaClient.reload(metaClient);
+        table = HoodieSparkTable.create(config, context(), metaClient);
+        HoodieActiveTimeline timeline = metaClient.getActiveTimeline();
 
-      assertTrue(HoodieTimeline
-              .compareTimestamps(timeline.lastInstant().get().getTimestamp(), HoodieTimeline.GREATER_THAN, newCommitTime),
-          "Compaction commit should be > than last insert");
+        assertTrue(HoodieTimeline
+                .compareTimestamps(timeline.lastInstant().get().getTimestamp(), HoodieTimeline.GREATER_THAN, newCommitTime),
+            "Compaction commit should be > than last insert");
 
-      for (String partitionPath : dataGen.getPartitionPaths()) {
-        List<FileSlice> fileSlices =
-            table.getSliceView().getLatestFileSlices(partitionPath).collect(Collectors.toList());
-        assertEquals(1, fileSlices.size());
-        for (FileSlice slice : fileSlices) {
-          assertEquals(3, slice.getLogFiles().count(), "After compaction there will still be one log file.");
-          assertNotNull(slice.getBaseFile(), "Base file is not created by log compaction operation.");
+        for (String partitionPath : dataGen.getPartitionPaths()) {
+          List<FileSlice> fileSlices =
+              table.getSliceView().getLatestFileSlices(partitionPath).collect(Collectors.toList());
+          assertEquals(1, fileSlices.size());
+          for (FileSlice slice : fileSlices) {
+            assertEquals(3, slice.getLogFiles().count(), "After compaction there will still be one log file.");
+            assertNotNull(slice.getBaseFile(), "Base file is not created by log compaction operation.");
+          }
+          assertTrue(result.getCommitMetadata().get().getWritePartitionPaths().stream().anyMatch(part -> part.contentEquals(partitionPath)));
         }
-        assertTrue(result.getCommitMetadata().get().getWritePartitionPaths().stream().anyMatch(part -> part.contentEquals(partitionPath)));
       }
     }
   }
@@ -414,7 +416,7 @@ public class TestHoodieMergeOnReadTable extends SparkClientFunctionalTestHarness
   @ParameterizedTest
   @ValueSource(booleans = {true, false})
   public void testMetadataStatsOnCommit(Boolean rollbackUsingMarkers) throws Exception {
-    HoodieWriteConfig cfg = getConfigBuilder(false, rollbackUsingMarkers, IndexType.INMEMORY)
+    HoodieWriteConfig cfg = getConfigBuilder(false, rollbackUsingMarkers, IndexType.BLOOM)
         .withAvroSchemaValidate(false)
         .withAllowAutoEvolutionColumnDrop(true)
         .withAutoCommit(false)
@@ -461,7 +463,6 @@ public class TestHoodieMergeOnReadTable extends SparkClientFunctionalTestHarness
       records = dataGen.generateUpdates(instantTime, records);
       writeRecords = jsc().parallelize(records, 1);
       statuses = client.upsert(writeRecords, instantTime);
-      //assertTrue(client.commit(instantTime, statuses), "Commit should succeed");
       inserts = 0;
       int upserts = 0;
       List<WriteStatus> writeStatusList = statuses.collect();
@@ -473,6 +474,11 @@ public class TestHoodieMergeOnReadTable extends SparkClientFunctionalTestHarness
       // Read from commit file
       assertEquals(0, inserts);
       assertEquals(200, upserts);
+
+      if (!rollbackUsingMarkers) {
+        // we can do listing based rollback only when commit is completed
+        assertTrue(client.commit(instantTime, statuses), "Commit should succeed");
+      }
 
       client.rollback(instantTime);
 

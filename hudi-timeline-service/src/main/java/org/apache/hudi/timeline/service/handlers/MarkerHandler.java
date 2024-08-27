@@ -126,8 +126,8 @@ public class MarkerHandler extends Handler {
     if (dispatchingThreadFuture != null) {
       dispatchingThreadFuture.cancel(true);
     }
-    dispatchingExecutorService.shutdown();
-    batchingExecutorService.shutdown();
+    dispatchingExecutorService.shutdownNow();
+    batchingExecutorService.shutdownNow();
   }
 
   /**
@@ -159,6 +159,16 @@ public class MarkerHandler extends Handler {
   public Set<String> getCreateAndMergeMarkers(String markerDir) {
     return getAllMarkers(markerDir).stream()
         .filter(markerName -> !markerName.endsWith(IOType.APPEND.name()))
+        .collect(Collectors.toSet());
+  }
+
+  /**
+   * @param markerDir marker directory path
+   * @return all marker paths of write IO type "APPEND"
+   */
+  public Set<String> getAppendMarkers(String markerDir) {
+    return getAllMarkers(markerDir).stream()
+        .filter(markerName -> markerName.endsWith(IOType.APPEND.name()))
         .collect(Collectors.toSet());
   }
 

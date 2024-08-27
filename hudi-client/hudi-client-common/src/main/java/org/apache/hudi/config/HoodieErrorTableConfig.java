@@ -72,11 +72,23 @@ public class HoodieErrorTableConfig {
       .defaultValue(false)
       .withDocumentation("Records with schema mismatch with Target Schema are sent to Error Table.");
 
+  public static final ConfigProperty<Boolean> ERROR_ENABLE_VALIDATE_RECORD_CREATION = ConfigProperty
+      .key("hoodie.errortable.validate.recordcreation.enable")
+      .defaultValue(true)
+      .sinceVersion("0.14.2")
+      .withDocumentation("Records that fail to be created due to keygeneration failure or other issues will be sent to the Error Table");
+
   public static final ConfigProperty<String> ERROR_TABLE_WRITE_FAILURE_STRATEGY = ConfigProperty
       .key("hoodie.errortable.write.failure.strategy")
       .defaultValue(ErrorWriteFailureStrategy.ROLLBACK_COMMIT.name())
       .withDocumentation("The config specifies the failure strategy if error table write fails. "
           + "Use one of - " + Arrays.toString(ErrorWriteFailureStrategy.values()));
+
+  public static final ConfigProperty<Boolean> ERROR_ENABLE_UNION_WITH_DATA_TABLE = ConfigProperty
+      .key("hoodie.errortable.write.union.enable")
+      .defaultValue(false)
+      .withDocumentation("Enable error table union with data table when writing for improved commit performance. "
+          + "By default it is disabled meaning data table and error table writes are sequential");
 
   public enum ErrorWriteFailureStrategy {
     ROLLBACK_COMMIT("Rollback the corresponding base table write commit for which the error events were triggered"),

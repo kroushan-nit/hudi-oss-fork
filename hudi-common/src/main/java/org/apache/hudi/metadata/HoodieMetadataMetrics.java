@@ -18,13 +18,18 @@
 
 package org.apache.hudi.metadata;
 
-import org.apache.hudi.common.metrics.Registry;
+import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
+import org.apache.hudi.common.util.Option;
+import org.apache.hudi.config.metrics.HoodieMetricsConfig;
 import org.apache.hudi.exception.HoodieIOException;
+import org.apache.hudi.metrics.HoodieGauge;
+import org.apache.hudi.metrics.Metrics;
 
+import com.codahale.metrics.MetricRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,19 +74,21 @@ public class HoodieMetadataMetrics implements Serializable {
   public static final String SKIP_TABLE_SERVICES = "skip_table_services";
   public static final String TABLE_SERVICE_EXECUTION_STATUS = "table_service_execution_status";
   public static final String TABLE_SERVICE_EXECUTION_DURATION = "table_service_execution_duration";
+  public static final String ASYNC_INDEXER_CATCHUP_TIME = "async_indexer_catchup_time";
 
   private static final Logger LOG = LoggerFactory.getLogger(HoodieMetadataMetrics.class);
 
-  private final Registry metricsRegistry;
+  private final transient MetricRegistry metricsRegistry;
+  private final transient Metrics metrics;
 
-  public HoodieMetadataMetrics(Registry metricsRegistry) {
-    this.metricsRegistry = metricsRegistry;
+  public HoodieMetadataMetrics(HoodieMetricsConfig metricsConfig) {
+    this.metrics = Metrics.getInstance(metricsConfig);
+    this.metricsRegistry = metrics.getRegistry();
   }
 
-  public Map<String, String> getStats(boolean detailed, HoodieTableMetaClient metaClient, HoodieTableMetadata metadata, Set<String> metadataPartitions) {
+  public Map<String, String> getStats(boolean detailed, HoodieTableFileSystemView metadataFileSystemView, HoodieTableMetadata metadata, Set<String> metadataPartitions) {
     try {
-      HoodieTableFileSystemView fsView = new HoodieTableFileSystemView(metaClient, metaClient.getActiveTimeline());
-      return getStats(fsView, detailed, metadata, metadataPartitions);
+      return getStats(metadataFileSystemView, detailed, metadata, metadataPartitions);
     } catch (IOException ioe) {
       throw new HoodieIOException("Unable to get metadata stats.", ioe);
     }
@@ -126,7 +133,7 @@ public class HoodieMetadataMetrics implements Serializable {
     return stats;
   }
 
-  protected void updateMetrics(String action, long durationInMs) {
+  public void updateMetrics(String action, long durationInMs) {
     if (metricsRegistry == null) {
       return;
     }
@@ -139,22 +146,25 @@ public class HoodieMetadataMetrics implements Serializable {
   }
 
   public void updateSizeMetrics(HoodieTableMetaClient metaClient, HoodieBackedTableMetadata metadata, Set<String> metadataPartitions) {
-    Map<String, String> stats = getStats(false, metaClient, metadata, metadataPartitions);
+    HoodieTableFileSystemView fileSystemView =
+        HoodieTableFileSystemView.fileListingBasedFileSystemView(new HoodieLocalEngineContext(metaClient.getHadoopConf()), metaClient, metaClient.getActiveTimeline());
+    Map<String, String> stats = getStats(false, fileSystemView, metadata, metadataPartitions);
     for (Map.Entry<String, String> e : stats.entrySet()) {
       setMetric(e.getKey(), Long.parseLong(e.getValue()));
     }
   }
 
   protected void incrementMetric(String action, long value) {
-    LOG.info(String.format("Updating metadata metrics (%s=%d) in %s", action, value, metricsRegistry));
-    metricsRegistry.add(action, value);
+    LOG.debug(String.format("Updating metadata metrics (%s=%d) in %s", action, value, metricsRegistry));
+    Option<HoodieGauge<Long>> gaugeOpt = metrics.registerGauge(action);
+    gaugeOpt.ifPresent(gauge -> gauge.setValue(gauge.getValue() + value));
   }
 
   protected void setMetric(String action, long value) {
-    metricsRegistry.set(action, value);
+    metrics.registerGauge(action, value);
   }
 
-  public Registry registry() {
+  public MetricRegistry registry() {
     return metricsRegistry;
   }
 }

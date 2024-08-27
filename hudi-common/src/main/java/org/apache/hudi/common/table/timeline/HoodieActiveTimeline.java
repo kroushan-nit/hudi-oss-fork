@@ -20,6 +20,7 @@ package org.apache.hudi.common.table.timeline;
 
 import org.apache.hudi.avro.model.HoodieRequestedReplaceMetadata;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
+import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant.State;
 import org.apache.hudi.common.util.FileIOUtils;
@@ -279,7 +280,7 @@ public class HoodieActiveTimeline extends HoodieDefaultTimeline {
         if (result) {
           LOG.info("Removed instant " + instant);
         } else {
-          throw new HoodieIOException("Could not delete instant " + instant);
+          throw new HoodieIOException("Could not delete instant " + instant + " with path " + commitFilePath);
         }
       } else {
         LOG.warn("The commit " + commitFilePath + " to remove does not exist");
@@ -297,7 +298,7 @@ public class HoodieActiveTimeline extends HoodieDefaultTimeline {
       if (result) {
         LOG.info("Removed instant " + instant);
       } else {
-        throw new HoodieIOException("Could not delete instant " + instant);
+        throw new HoodieIOException("Could not delete instant " + instant + " with path " + inFlightCommitFilePath);
       }
     } catch (IOException e) {
       throw new HoodieIOException("Could not remove inflight commit " + inFlightCommitFilePath, e);
@@ -317,7 +318,8 @@ public class HoodieActiveTimeline extends HoodieDefaultTimeline {
     return Option.fromJavaOptional(
         getCommitMetadataStream()
             .filter(instantCommitMetadataPair ->
-                !StringUtils.isNullOrEmpty(instantCommitMetadataPair.getValue().getMetadata(HoodieCommitMetadata.SCHEMA_KEY)))
+                WriteOperationType.canUpdateSchema(instantCommitMetadataPair.getRight().getOperationType())
+                    && !StringUtils.isNullOrEmpty(instantCommitMetadataPair.getValue().getMetadata(HoodieCommitMetadata.SCHEMA_KEY)))
             .findFirst()
     );
   }
@@ -466,6 +468,12 @@ public class HoodieActiveTimeline extends HoodieDefaultTimeline {
     return commitInstant;
   }
 
+  private void createFileInAuxiliaryFolder(HoodieInstant instant, Option<byte[]> data) {
+    // This will be removed in future release. See HUDI-546
+    Path fullPath = new Path(metaClient.getMetaAuxiliaryPath(), instant.getFileName());
+    FileIOUtils.createFileInPath(metaClient.getFs(), fullPath, data);
+  }
+
   /**
    * Transition Log Compaction State from inflight to Committed.
    *
@@ -599,7 +607,7 @@ public class HoodieActiveTimeline extends HoodieDefaultTimeline {
 
   protected void transitionState(HoodieInstant fromInstant, HoodieInstant toInstant, Option<byte[]> data,
        boolean allowRedundantTransitions) {
-    ValidationUtils.checkArgument(fromInstant.getTimestamp().equals(toInstant.getTimestamp()));
+    ValidationUtils.checkArgument(fromInstant.getTimestamp().equals(toInstant.getTimestamp()), String.format("%s and %s are not consistent when transition state.", fromInstant, toInstant));
     try {
       if (metaClient.getTimelineLayoutVersion().isNullVersion()) {
         // Re-create the .inflight file by opening a new file and write the commit metadata in
@@ -685,8 +693,20 @@ public class HoodieActiveTimeline extends HoodieDefaultTimeline {
     saveToCompactionRequested(instant, content, false);
   }
 
+  public void saveToCompactionRequestedOptionallyAuxFolder(HoodieInstant instant, Option<byte[]> content, boolean writetoAuxFolder) {
+    saveToCompactionRequested(instant, content, false, writetoAuxFolder);
+  }
+
   public void saveToCompactionRequested(HoodieInstant instant, Option<byte[]> content, boolean overwrite) {
+    saveToCompactionRequested(instant, content, overwrite, false);
+  }
+
+  public void saveToCompactionRequested(HoodieInstant instant, Option<byte[]> content, boolean overwrite, boolean writeToAuxFolder) {
     ValidationUtils.checkArgument(instant.getAction().equals(HoodieTimeline.COMPACTION_ACTION));
+    if (writeToAuxFolder) {
+      // Write workload to auxiliary folder
+      createFileInAuxiliaryFolder(instant, content);
+    }
     createFileInMetaPath(instant.getFileName(), content, overwrite);
   }
 
@@ -695,7 +715,15 @@ public class HoodieActiveTimeline extends HoodieDefaultTimeline {
   }
 
   public void saveToLogCompactionRequested(HoodieInstant instant, Option<byte[]> content, boolean overwrite) {
+    saveToLogCompactionRequested(instant, content, overwrite, false);
+  }
+
+  public void saveToLogCompactionRequested(HoodieInstant instant, Option<byte[]> content, boolean overwrite, boolean writeToAuxFolder) {
     ValidationUtils.checkArgument(instant.getAction().equals(HoodieTimeline.LOG_COMPACTION_ACTION));
+    if (writeToAuxFolder) {
+      // Write workload to auxiliary folder
+      createFileInAuxiliaryFolder(instant, content);
+    }
     createFileInMetaPath(instant.getFileName(), content, overwrite);
   }
 

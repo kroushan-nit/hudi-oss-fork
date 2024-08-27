@@ -56,6 +56,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.TreeMap;
+import java.util.function.Supplier;
 
 import static org.apache.hudi.common.util.TypeUtils.unsafeCast;
 import static org.apache.hudi.common.util.ValidationUtils.checkState;
@@ -73,7 +74,7 @@ public class HoodieHFileDataBlock extends HoodieDataBlock {
   // interpreted as the actual file path for the HFile data blocks
   private final Path pathForReader;
 
-  public HoodieHFileDataBlock(FSDataInputStream inputStream,
+  public HoodieHFileDataBlock(Supplier<FSDataInputStream> inputStreamSupplier,
                               Option<byte[]> content,
                               boolean readBlockLazily,
                               HoodieLogBlockContentLocation logBlockContentLocation,
@@ -82,7 +83,8 @@ public class HoodieHFileDataBlock extends HoodieDataBlock {
                               Map<HeaderMetadataType, String> footer,
                               boolean enablePointLookups,
                               Path pathForReader) {
-    super(content, inputStream, readBlockLazily, Option.of(logBlockContentLocation), readerSchema, header, footer, HoodieAvroHFileReader.KEY_FIELD_NAME, enablePointLookups);
+    super(content, inputStreamSupplier, readBlockLazily, Option.of(logBlockContentLocation), readerSchema, header, footer,
+        HoodieAvroHFileReader.KEY_FIELD_NAME, enablePointLookups, HoodieLogBlock.version);
     this.compressionAlgorithm = Option.empty();
     this.pathForReader = pathForReader;
   }
@@ -90,8 +92,9 @@ public class HoodieHFileDataBlock extends HoodieDataBlock {
   public HoodieHFileDataBlock(List<HoodieRecord> records,
                               Map<HeaderMetadataType, String> header,
                               Compression.Algorithm compressionAlgorithm,
-                              Path pathForReader) {
-    super(records, header, new HashMap<>(), HoodieAvroHFileReader.KEY_FIELD_NAME);
+                              Path pathForReader,
+                              int logBlockVersionToWrite) {
+    super(records, header, new HashMap<>(), HoodieAvroHFileReader.KEY_FIELD_NAME, logBlockVersionToWrite);
     this.compressionAlgorithm = Option.of(compressionAlgorithm);
     this.pathForReader = pathForReader;
   }
@@ -172,10 +175,13 @@ public class HoodieHFileDataBlock extends HoodieDataBlock {
   protected <T> ClosableIterator<HoodieRecord<T>> deserializeRecords(byte[] content, HoodieRecordType type) throws IOException {
     checkState(readerSchema != null, "Reader's schema has to be non-null");
 
-    FileSystem fs = FSUtils.getFs(pathForReader.toString(), FSUtils.buildInlineConf(getBlockContentLocation().get().getHadoopConf()));
+    Configuration hadoopConf = FSUtils.buildInlineConf(getBlockContentLocation().get().getHadoopConf());
+    FileSystem fs = FSUtils.getFs(pathForReader.toString(), hadoopConf);
     // Read the content
-    HoodieAvroHFileReader reader = new HoodieAvroHFileReader(fs, pathForReader, content, Option.of(getSchemaFromHeader()));
-    return unsafeCast(reader.getRecordIterator(readerSchema));
+    try (HoodieAvroHFileReader reader = new HoodieAvroHFileReader(hadoopConf, pathForReader, new CacheConfig(hadoopConf),
+                                                             fs, content, Option.of(getSchemaFromHeader()))) {
+      return unsafeCast(reader.getRecordIterator(readerSchema));
+    }
   }
 
   // TODO abstract this w/in HoodieDataBlock
@@ -193,15 +199,15 @@ public class HoodieHFileDataBlock extends HoodieDataBlock {
         blockContentLoc.getContentPositionInLogFile(),
         blockContentLoc.getBlockSize());
 
-    final HoodieAvroHFileReader reader =
+    try (final HoodieAvroHFileReader reader =
              new HoodieAvroHFileReader(inlineConf, inlinePath, new CacheConfig(inlineConf), inlinePath.getFileSystem(inlineConf),
-             Option.of(getSchemaFromHeader()));
+             Option.of(getSchemaFromHeader()))) {
+      // Get writer's schema from the header
+      final ClosableIterator<HoodieRecord<IndexedRecord>> recordIterator =
+          fullKey ? reader.getRecordsByKeysIterator(sortedKeys, readerSchema) : reader.getRecordsByKeyPrefixIterator(sortedKeys, readerSchema);
 
-    // Get writer's schema from the header
-    final ClosableIterator<HoodieRecord<IndexedRecord>> recordIterator =
-        fullKey ? reader.getRecordsByKeysIterator(sortedKeys, readerSchema) : reader.getRecordsByKeyPrefixIterator(sortedKeys, readerSchema);
-
-    return new CloseableMappingIterator<>(recordIterator, data -> (HoodieRecord<T>) data);
+      return new CloseableMappingIterator<>(recordIterator, data -> (HoodieRecord<T>) data);
+    }
   }
 
   private byte[] serializeRecord(HoodieRecord<?> record, Schema schema) throws IOException {

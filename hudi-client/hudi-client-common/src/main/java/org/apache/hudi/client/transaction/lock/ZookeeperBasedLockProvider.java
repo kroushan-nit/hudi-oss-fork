@@ -31,6 +31,7 @@ import org.apache.curator.framework.imps.CuratorFrameworkState;
 import org.apache.curator.framework.recipes.locks.InterProcessMutex;
 import org.apache.curator.retry.BoundedExponentialBackoffRetry;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.zookeeper.KeeperException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,6 +75,42 @@ public class ZookeeperBasedLockProvider implements LockProvider<InterProcessMute
         .connectionTimeoutMs(lockConfiguration.getConfig().getInteger(ZK_CONNECTION_TIMEOUT_MS_PROP_KEY, DEFAULT_ZK_CONNECTION_TIMEOUT_MS))
         .build();
     this.curatorFrameworkClient.start();
+    createPathIfNotExists();
+  }
+
+  private String getLockPath() {
+    return lockConfiguration.getConfig().getString(ZK_BASE_PATH_PROP_KEY) + "/"
+        + this.lockConfiguration.getConfig().getString(ZK_LOCK_KEY_PROP_KEY);
+  }
+
+  private void createPathIfNotExists() {
+    try {
+      String lockPath = getLockPath();
+      LOG.info(String.format("Creating zookeeper path %s if not exists", lockPath));
+      String[] parts = lockPath.split("/");
+      StringBuilder currentPath = new StringBuilder();
+      for (String part : parts) {
+        if (!part.isEmpty()) {
+          currentPath.append("/").append(part);
+          createNodeIfNotExists(currentPath.toString());
+        }
+      }
+    } catch (Exception e) {
+      LOG.error("Failed to create ZooKeeper path: " + e.getMessage());
+      throw new HoodieLockException("Failed to initialize ZooKeeper path", e);
+    }
+  }
+
+  private void createNodeIfNotExists(String path) throws Exception {
+    if (this.curatorFrameworkClient.checkExists().forPath(path) == null) {
+      try {
+        this.curatorFrameworkClient.create().forPath(path);
+      } catch (KeeperException e) {
+        if (e.code() != KeeperException.Code.NODEEXISTS) {
+          throw new HoodieLockException("Failed to create zookeeper node", e);
+        }
+      }
+    }
   }
 
   // Only used for testing
@@ -139,8 +176,7 @@ public class ZookeeperBasedLockProvider implements LockProvider<InterProcessMute
   private void acquireLock(long time, TimeUnit unit) throws Exception {
     ValidationUtils.checkArgument(this.lock == null, generateLogStatement(LockState.ALREADY_ACQUIRED, generateLogSuffixString()));
     InterProcessMutex newLock = new InterProcessMutex(
-        this.curatorFrameworkClient, lockConfiguration.getConfig().getString(ZK_BASE_PATH_PROP_KEY) + "/"
-        + this.lockConfiguration.getConfig().getString(ZK_LOCK_KEY_PROP_KEY));
+        this.curatorFrameworkClient, getLockPath());
     boolean acquired = newLock.acquire(time, unit);
     if (!acquired) {
       throw new HoodieLockException(generateLogStatement(LockState.FAILED_TO_ACQUIRE, generateLogSuffixString()));
@@ -155,8 +191,6 @@ public class ZookeeperBasedLockProvider implements LockProvider<InterProcessMute
   private void checkRequiredProps(final LockConfiguration config) {
     ValidationUtils.checkArgument(config.getConfig().getString(ZK_CONNECT_URL_PROP_KEY) != null);
     ValidationUtils.checkArgument(config.getConfig().getString(ZK_BASE_PATH_PROP_KEY) != null);
-    ValidationUtils.checkArgument(config.getConfig().getString(ZK_SESSION_TIMEOUT_MS_PROP_KEY) != null);
-    ValidationUtils.checkArgument(config.getConfig().getString(ZK_CONNECTION_TIMEOUT_MS_PROP_KEY) != null);
     ValidationUtils.checkArgument(config.getConfig().getString(ZK_LOCK_KEY_PROP_KEY) != null);
   }
 

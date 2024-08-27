@@ -33,7 +33,6 @@ import java.util.stream.IntStream;
 import java.util.List;
 
 import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.DEFAULT_PARTITION_PATHS;
-import static org.apache.hudi.sync.common.util.ManifestFileWriter.fetchLatestBaseFilesForAllPartitions;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,15 +48,15 @@ public class TestManifestFileWriter extends HoodieCommonTestHarness {
   public void testMultiLevelPartitionedTable() throws Exception {
     // Generate 10 files under each partition
     createTestDataForPartitionedTable(metaClient, 10);
-    ManifestFileWriter manifestFileWriter = ManifestFileWriter.builder().setConf(metaClient.getHadoopConf()).setBasePath(basePath).build();
-    assertEquals(30, fetchLatestBaseFilesForAllPartitions(metaClient, false, false, false).count());
+    ManifestFileWriter manifestFileWriter = ManifestFileWriter.builder().setMetaClient(metaClient).build();
+    assertEquals(30, manifestFileWriter.fetchLatestBaseFilesForAllPartitions(false).count());
   }
 
   @Test
   public void testCreateManifestFile() throws Exception {
     // Generate 10 files under each partition
     createTestDataForPartitionedTable(metaClient, 3);
-    ManifestFileWriter manifestFileWriter = ManifestFileWriter.builder().setConf(metaClient.getHadoopConf()).setBasePath(basePath).build();
+    ManifestFileWriter manifestFileWriter = ManifestFileWriter.builder().setMetaClient(metaClient).build();
     manifestFileWriter.writeManifestFile(false);
     Path manifestFilePath = manifestFileWriter.getManifestFilePath(false);
     try (InputStream is = metaClient.getFs().open(manifestFilePath)) {
@@ -71,7 +70,7 @@ public class TestManifestFileWriter extends HoodieCommonTestHarness {
   public void testCreateManifestFileWithAbsolutePath() throws Exception {
     // Generate 10 files under each partition
     createTestDataForPartitionedTable(metaClient, 3);
-    ManifestFileWriter manifestFileWriter = ManifestFileWriter.builder().setConf(metaClient.getHadoopConf()).setBasePath(basePath).build();
+    ManifestFileWriter manifestFileWriter = ManifestFileWriter.builder().setMetaClient(metaClient).build();
     manifestFileWriter.writeManifestFile(true);
     Path manifestFilePath = manifestFileWriter.getManifestFilePath(true);
     try (InputStream is = metaClient.getFs().open(manifestFilePath)) {
@@ -92,7 +91,7 @@ public class TestManifestFileWriter extends HoodieCommonTestHarness {
 
   @Test
   public void getManifestSourceUri() {
-    ManifestFileWriter manifestFileWriter = ManifestFileWriter.builder().setConf(metaClient.getHadoopConf()).setBasePath(basePath).build();
+    ManifestFileWriter manifestFileWriter = ManifestFileWriter.builder().setMetaClient(metaClient).build();
     String sourceUri = manifestFileWriter.getManifestSourceUri(false);
     assertEquals(new Path(basePath, ".hoodie/manifest/*").toUri().toString(), sourceUri);
 

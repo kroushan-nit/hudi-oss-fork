@@ -37,7 +37,7 @@ import java.util.stream.Stream;
  * @param <T> The generic type of the keys
  * @param <R> The generic type of the values
  */
-public abstract class DiskMap<T extends Serializable, R extends Serializable> implements Map<T, R>, Iterable<R> {
+public abstract class DiskMap<T extends Serializable, R> implements Map<T, R>, Iterable<R>, AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(DiskMap.class);
   private static final String SUBFOLDER_PREFIX = "hudi";
@@ -63,7 +63,10 @@ public abstract class DiskMap<T extends Serializable, R extends Serializable> im
    * (typically 4 KB) to disk.
    */
   private void addShutDownHook() {
-    shutdownThread = new Thread(this::cleanup);
+    shutdownThread = new Thread(() -> {
+      LOG.warn("Failed to properly close DiskMap in application");
+      cleanup();
+    });
     Runtime.getRuntime().addShutdownHook(shutdownThread);
   }
 

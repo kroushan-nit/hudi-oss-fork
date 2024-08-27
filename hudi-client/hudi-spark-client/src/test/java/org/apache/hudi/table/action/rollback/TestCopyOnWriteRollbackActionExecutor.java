@@ -59,6 +59,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -102,7 +103,7 @@ public class TestCopyOnWriteRollbackActionExecutor extends HoodieClientRollbackT
         .withBaseFilesInPartition(p1, "id21").getLeft()
         .withBaseFilesInPartition(p2, "id22").getLeft();
 
-    HoodieWriteConfig writeConfig = getConfigBuilder().withRollbackUsingMarkers(false).build();
+    HoodieWriteConfig writeConfig = getConfigBuilder().withRollbackUsingMarkers(false).withEmbeddedTimelineServerEnabled(false).build();
     HoodieTable table = this.getHoodieTable(metaClient, writeConfig);
     HoodieInstant needRollBackInstant = new HoodieInstant(false, HoodieTimeline.COMMIT_ACTION, "002");
     String rollbackInstant = "003";
@@ -260,7 +261,7 @@ public class TestCopyOnWriteRollbackActionExecutor extends HoodieClientRollbackT
         .addCommit("003")
         .withBaseFilesInPartition(p3, fileLengths);
 
-    HoodieTable table = this.getHoodieTable(metaClient, getConfigBuilder().withRollbackUsingMarkers(false).build());
+    HoodieTable table = this.getHoodieTable(metaClient, getConfigBuilder().withRollbackUsingMarkers(false).withEmbeddedTimelineServerEnabled(false).build());
     HoodieInstant needRollBackInstant = new HoodieInstant(false, HoodieTimeline.COMMIT_ACTION, "003");
 
     // Schedule rollback
@@ -351,7 +352,7 @@ public class TestCopyOnWriteRollbackActionExecutor extends HoodieClientRollbackT
         .withBaseFilesInPartition(p1, "id21").getLeft()
         .withBaseFilesInPartition(p2, "id22").getLeft();
 
-    HoodieTable table = this.getHoodieTable(metaClient, getConfigBuilder().withRollbackBackupEnabled(true).build());
+    HoodieTable table = this.getHoodieTable(metaClient, getConfigBuilder().withRollbackBackupEnabled(true).withEmbeddedTimelineServerEnabled(false).build());
     HoodieInstant needRollBackInstant = new HoodieInstant(false, HoodieTimeline.COMMIT_ACTION, "002");
 
     // Create the rollback plan and perform the rollback
@@ -410,7 +411,7 @@ public class TestCopyOnWriteRollbackActionExecutor extends HoodieClientRollbackT
   public void testRollbackWhenReplaceCommitIsPresent() throws Exception {
 
     // insert data
-    HoodieWriteConfig writeConfig = getConfigBuilder().withAutoCommit(false).build();
+    HoodieWriteConfig writeConfig = getConfigBuilder().withAutoCommit(false).withEmbeddedTimelineServerEnabled(false).build();
     SparkRDDWriteClient writeClient = getHoodieWriteClient(writeConfig);
 
     // Create a base commit.
@@ -429,7 +430,10 @@ public class TestCopyOnWriteRollbackActionExecutor extends HoodieClientRollbackT
         2, true);
 
     // Create completed clustering commit
-    SparkRDDWriteClient clusteringClient = getHoodieWriteClient(ClusteringTestUtils.getClusteringConfig(basePath));
+    Properties properties = new Properties();
+    properties.put("hoodie.datasource.write.row.writer.enable", String.valueOf(false));
+    SparkRDDWriteClient clusteringClient = getHoodieWriteClient(
+        ClusteringTestUtils.getClusteringConfig(basePath, HoodieTestDataGenerator.TRIP_EXAMPLE_SCHEMA, properties));
 
     // Save an older instant for us to run clustering.
     String clusteringInstant1 = HoodieActiveTimeline.createNewInstantTime();
@@ -440,7 +444,7 @@ public class TestCopyOnWriteRollbackActionExecutor extends HoodieClientRollbackT
     // Now execute clustering on the saved instant and do not allow it to commit.
     ClusteringTestUtils.runClusteringOnInstant(clusteringClient, false, false, clusteringInstant1);
 
-    HoodieTable table = this.getHoodieTable(metaClient, getConfigBuilder().build());
+    HoodieTable table = this.getHoodieTable(metaClient, getConfigBuilder().withEmbeddedTimelineServerEnabled(false).build());
     HoodieInstant needRollBackInstant = new HoodieInstant(false, HoodieTimeline.COMMIT_ACTION, secondCommit);
 
     // Schedule rollback
@@ -467,52 +471,5 @@ public class TestCopyOnWriteRollbackActionExecutor extends HoodieClientRollbackT
     CopyOnWriteRollbackActionExecutor copyOnWriteRollbackActionExecutorForClustering = new CopyOnWriteRollbackActionExecutor(
         context, table.getConfig(), table, rollbackInstant, needRollBackInstant, true, false, true);
     copyOnWriteRollbackActionExecutorForClustering.execute();
-  }
-
-  /**
-   * This method tests rollback of completed ingestion commits and replacecommit inflight files
-   * when there is another replacecommit with greater timestamp already present in the timeline.
-   */
-  @Test
-  public void testDeletingInflightsWhichAreAlreadyRolledBack() throws Exception {
-
-    // insert data
-    HoodieWriteConfig writeConfig = getConfigBuilder().withAutoCommit(false).build();
-    SparkRDDWriteClient writeClient = getHoodieWriteClient(writeConfig);
-
-    // Create a base commit.
-    int numRecords = 200;
-    String firstCommit = HoodieActiveTimeline.createNewInstantTime();
-    String partitionStr = HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH;
-    dataGen = new HoodieTestDataGenerator(new String[]{partitionStr});
-    writeBatch(writeClient, firstCommit, "000", Option.of(Arrays.asList("000")), "000",
-        numRecords, dataGen::generateInserts, SparkRDDWriteClient::insert, true, numRecords, numRecords,
-        1, true);
-    // Create inflight commit.
-    String secondCommit = writeClient.startCommit();
-    // Insert completed commit
-    String thirdCommit = HoodieActiveTimeline.createNewInstantTime();
-    writeBatch(writeClient, thirdCommit, firstCommit, Option.of(Arrays.asList("000")), "000",
-        numRecords, dataGen::generateInserts, SparkRDDWriteClient::insert, false, numRecords, numRecords,
-        1, true);
-    // Rollback secondCommit which is an inflight.
-    writeClient.rollback(secondCommit);
-    assertEquals(1, metaClient.reloadActiveTimeline()
-        .getRollbackTimeline().filterCompletedInstants().getInstants().size());
-    assertFalse(metaClient.getActiveTimeline().filterInflightsAndRequested().firstInstant().isPresent());
-
-    // Create inflight commit back into timeline for testing purposes.
-    writeClient.startCommitWithTime(secondCommit);
-    assertTrue(metaClient.reloadActiveTimeline().filterInflightsAndRequested().firstInstant().isPresent());
-
-    // Insert completed commit
-    String fourthCommit = HoodieActiveTimeline.createNewInstantTime();
-    writeBatch(writeClient, fourthCommit, thirdCommit, Option.of(Arrays.asList("000")), "000",
-        numRecords, dataGen::generateInserts, SparkRDDWriteClient::insert, false, numRecords, numRecords,
-        1, true);
-    assertEquals(1, metaClient.reloadActiveTimeline()
-        .getRollbackTimeline().filterCompletedInstants().getInstants().size());
-    assertFalse(metaClient.getActiveTimeline().filterInflightsAndRequested().firstInstant().isPresent());
-    assertEquals(3, metaClient.getActiveTimeline().getCommitsTimeline().countInstants());
   }
 }

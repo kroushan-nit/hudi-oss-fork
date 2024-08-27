@@ -48,7 +48,7 @@ import org.apache.hudi.config.HoodieArchivalConfig;
 import org.apache.hudi.config.HoodieIndexConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.metadata.HoodieBackedTableMetadata;
-import org.apache.hudi.metadata.HoodieMetadataFileSystemView;
+import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.table.action.clean.CleanPlanner;
 import org.apache.hudi.testutils.HoodieClientTestBase;
@@ -155,7 +155,8 @@ public class TestExternalPathHandling extends HoodieClientTestBase {
     HoodieCleanMetadata cleanMetadata = CleanerUtils.convertCleanMetadata(
         cleanTime,
         Option.empty(),
-        cleanStats);
+        cleanStats,
+        Collections.EMPTY_MAP);
     try (HoodieTableMetadataWriter hoodieTableMetadataWriter = (HoodieTableMetadataWriter) writeClient.initTable(WriteOperationType.UPSERT, Option.of(cleanTime)).getMetadataWriter(cleanTime).get()) {
       hoodieTableMetadataWriter.update(cleanMetadata, cleanTime);
       metaClient.getActiveTimeline().transitionCleanInflightToComplete(inflightClean,
@@ -205,7 +206,8 @@ public class TestExternalPathHandling extends HoodieClientTestBase {
   }
 
   private void assertFileGroupCorrectness(String instantTime, String partitionPath, String filePath, String fileId, int expectedSize) {
-    HoodieTableFileSystemView fsView = new HoodieMetadataFileSystemView(context, metaClient, metaClient.reloadActiveTimeline(), writeConfig.getMetadataConfig());
+    HoodieTableMetadata tableMetadata = HoodieTableMetadata.create(context, writeConfig.getMetadataConfig(), metaClient.getBasePath(), true);
+    HoodieTableFileSystemView fsView = new HoodieTableFileSystemView(tableMetadata, metaClient, metaClient.reloadActiveTimeline());
     List<HoodieFileGroup> fileGroups = fsView.getAllFileGroups(partitionPath).collect(Collectors.toList());
     Assertions.assertEquals(expectedSize, fileGroups.size());
     Option<HoodieFileGroup> fileGroupOption = Option.fromJavaOptional(fileGroups.stream().filter(fg -> fg.getFileGroupId().getFileId().equals(fileId)).findFirst());
@@ -293,6 +295,6 @@ public class TestExternalPathHandling extends HoodieClientTestBase {
     return new HoodieCleanerPlan(earliestInstantToRetain,
         latestCommit,
         writeConfig.getCleanerPolicy().name(), Collections.emptyMap(),
-        CleanPlanner.LATEST_CLEAN_PLAN_VERSION, filePathsToBeDeletedPerPartition, Collections.emptyList());
+        CleanPlanner.LATEST_CLEAN_PLAN_VERSION, filePathsToBeDeletedPerPartition, Collections.emptyList(), Collections.EMPTY_MAP);
   }
 }

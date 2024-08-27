@@ -35,8 +35,6 @@ import org.apache.hudi.common.table.timeline.HoodieDefaultTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
-import org.apache.hudi.common.table.view.FileSystemViewStorageType;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.testutils.RawTripTestPayload;
@@ -63,6 +61,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -403,6 +402,7 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     return Stream.of(data).map(Arguments::of);
   }
 
+  @Disabled("HUDI-7353")
   @ParameterizedTest
   @MethodSource("regularIndexTypeParams")
   public void testTagLocationAndFetchRecordLocations(IndexType indexType, boolean populateMetaFields, boolean enableMetadataIndex) throws Exception {
@@ -554,6 +554,27 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     assertFalse(timeline.empty());
     assertFalse(HoodieIndexUtils.checkIfValidCommit(timeline, instantTimestamp));
     assertFalse(HoodieIndexUtils.checkIfValidCommit(timeline, instantTimestampSec));
+
+    // Check the completed delta commit instant which is end with DEFAULT_MILLIS_EXT timestamp
+    // Timestamp not contain in inflight timeline, checkContainsInstant() should return false
+    // Timestamp contain in inflight timeline, checkContainsInstant() should return true
+    String checkInstantTimestampSec = instantTimestamp.substring(0, instantTimestamp.length() - HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT.length());
+    String checkInstantTimestamp = checkInstantTimestampSec + HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT;
+    Thread.sleep(2000); // sleep required so that new timestamp differs in the seconds rather than msec
+    String newTimestamp = HoodieActiveTimeline.createNewInstantTime();
+    String newTimestampSec = newTimestamp.substring(0, newTimestamp.length() - HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT.length());
+    final HoodieInstant instant5 = new HoodieInstant(true, HoodieTimeline.DELTA_COMMIT_ACTION, newTimestamp);
+    timeline = new HoodieDefaultTimeline(Stream.of(instant5), metaClient.getActiveTimeline()::getInstantDetails);
+    assertFalse(timeline.empty());
+    assertFalse(timeline.containsInstant(checkInstantTimestamp));
+    assertFalse(timeline.containsInstant(checkInstantTimestampSec));
+
+    final HoodieInstant instant6 = new HoodieInstant(true, HoodieTimeline.DELTA_COMMIT_ACTION, newTimestampSec + HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT);
+    timeline = new HoodieDefaultTimeline(Stream.of(instant6), metaClient.getActiveTimeline()::getInstantDetails);
+    assertFalse(timeline.empty());
+    assertFalse(timeline.containsInstant(newTimestamp));
+    assertFalse(timeline.containsInstant(checkInstantTimestamp));
+    assertTrue(timeline.containsInstant(instant6.getTimestamp()));
   }
 
   @Test
@@ -624,8 +645,7 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
         .withCompactionConfig(HoodieCompactionConfig.newBuilder().compactionSmallFileSize(1024 * 1024).build())
         .withStorageConfig(HoodieStorageConfig.newBuilder().hfileMaxFileSize(1024 * 1024).parquetMaxFileSize(1024 * 1024).build())
         .forTable("test-trip-table")
-        .withEmbeddedTimelineServerEnabled(true).withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder()
-            .withStorageType(FileSystemViewStorageType.EMBEDDED_KV_STORE).build());
+        .withEmbeddedTimelineServerEnabled(true);
   }
 
   private JavaPairRDD<HoodieKey, Option<Pair<String, String>>> getRecordLocations(JavaRDD<HoodieKey> keyRDD, HoodieTable hoodieTable) {

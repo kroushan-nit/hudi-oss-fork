@@ -35,6 +35,8 @@ import org.apache.hudi.configuration.OptionsResolver;
 import org.apache.hudi.exception.HoodieCatalogException;
 import org.apache.hudi.exception.HoodieMetadataException;
 import org.apache.hudi.hadoop.utils.HoodieInputFormatUtils;
+import org.apache.hudi.keygen.NonpartitionedAvroKeyGenerator;
+import org.apache.hudi.table.HoodieTableFactory;
 import org.apache.hudi.table.format.FilePathUtils;
 import org.apache.hudi.util.AvroSchemaConverter;
 import org.apache.hudi.util.DataTypeUtils;
@@ -98,6 +100,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -455,8 +458,9 @@ public class HoodieHiveCatalog extends AbstractCatalog {
       throw new DatabaseNotExistException(getName(), tablePath.getDatabaseName());
     }
 
-    if (!table.getOptions().getOrDefault(CONNECTOR.key(), "").equalsIgnoreCase("hudi")) {
-      throw new HoodieCatalogException(String.format("The %s is not hoodie table", tablePath.getObjectName()));
+    if (!table.getOptions().getOrDefault(CONNECTOR.key(), "").equalsIgnoreCase(HoodieTableFactory.FACTORY_ID)) {
+      throw new HoodieCatalogException(String.format("Unsupported connector identity %s, supported identity is %s",
+          table.getOptions().getOrDefault(CONNECTOR.key(), ""), HoodieTableFactory.FACTORY_ID));
     }
 
     if (table instanceof CatalogView) {
@@ -504,11 +508,20 @@ public class HoodieHiveCatalog extends AbstractCatalog {
       flinkConf.setString(FlinkOptions.PARTITION_PATH_FIELD, partitions);
     }
 
+    if (!catalogTable.isPartitioned()) {
+      flinkConf.setString(FlinkOptions.KEYGEN_CLASS_NAME.key(), NonpartitionedAvroKeyGenerator.class.getName());
+    }
+
     if (!flinkConf.getOptional(PATH).isPresent()) {
       flinkConf.setString(PATH, inferTablePath(tablePath, catalogTable));
     }
 
     flinkConf.setString(FlinkOptions.TABLE_NAME, tablePath.getObjectName());
+
+    List<String> fields = new ArrayList<>();
+    catalogTable.getUnresolvedSchema().getColumns().forEach(column -> fields.add(column.getName()));
+    StreamerUtil.checkPreCombineKey(flinkConf, fields);
+
     try {
       StreamerUtil.initTableIfNotExists(flinkConf, hiveConf);
     } catch (IOException e) {

@@ -118,6 +118,7 @@ public class UtilitiesTestBase {
   protected static HoodieSparkEngineContext context;
   protected static SparkSession sparkSession;
   protected static SQLContext sqlContext;
+  protected static Configuration hadoopConf;
 
   @BeforeAll
   public static void setLogLevel() {
@@ -131,7 +132,7 @@ public class UtilitiesTestBase {
   }
 
   public static void initTestServices(boolean needsHdfs, boolean needsHive, boolean needsZookeeper) throws Exception {
-    final Configuration hadoopConf = HoodieTestUtils.getDefaultHadoopConf();
+    hadoopConf = HoodieTestUtils.getDefaultHadoopConf();
     hadoopConf.set("hive.exec.scratchdir", System.getenv("java.io.tmpdir") + "/hive");
 
     if (needsHdfs) {
@@ -234,9 +235,9 @@ public class UtilitiesTestBase {
     HiveSyncConfig hiveSyncConfig = getHiveSyncConfig(tempWriteablePath, "dummy");
     hiveSyncConfig.setHadoopConf(hiveTestService.getHiveConf());
     HoodieTableMetaClient.withPropertyBuilder()
-      .setTableType(HoodieTableType.COPY_ON_WRITE)
-      .setTableName(hiveSyncConfig.getString(META_SYNC_TABLE_NAME))
-      .initTable(fs.getConf(), hiveSyncConfig.getString(META_SYNC_BASE_PATH));
+        .setTableType(HoodieTableType.COPY_ON_WRITE)
+        .setTableName(hiveSyncConfig.getString(META_SYNC_TABLE_NAME))
+        .initTable(fs.getConf(), hiveSyncConfig.getString(META_SYNC_BASE_PATH));
 
     QueryBasedDDLExecutor ddlExecutor = new JDBCExecutor(hiveSyncConfig);
     ddlExecutor.runSQL("drop database if exists " + hiveSyncConfig.getString(META_SYNC_DATABASE_NAME));
@@ -443,6 +444,15 @@ public class UtilitiesTestBase {
         int key = i % partitions;
         String value = Helpers.toJsonString(records.get(i));
         data[i] = new Tuple2<>(Long.toString(key), value);
+      }
+      return data;
+    }
+
+    public static Tuple2<String, String>[] jsonifyRecordsByPartitionsWithNullKafkaKey(List<HoodieRecord> records, int partitions) {
+      Tuple2<String, String>[] data = new Tuple2[records.size()];
+      for (int i = 0; i < records.size(); i++) {
+        String value = Helpers.toJsonString(records.get(i));
+        data[i] = new Tuple2<>(null, value);
       }
       return data;
     }

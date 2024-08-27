@@ -31,8 +31,6 @@ import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
-import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
-import org.apache.hudi.common.table.view.FileSystemViewStorageType;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
@@ -230,6 +228,8 @@ public class TestSparkConsistentBucketClustering extends HoodieSparkClientTestHa
     } else {
       options.put(HoodieClusteringConfig.PLAN_STRATEGY_SORT_COLUMNS.key(), sortColumn);
     }
+    // TODO: row writer does not support sort for consistent hashing index
+    options.put("hoodie.datasource.write.row.writer.enable", String.valueOf(false));
     setup(128 * 1024 * 1024, options);
 
     writeData(HoodieActiveTimeline.createNewInstantTime(), 500, true);
@@ -254,6 +254,8 @@ public class TestSparkConsistentBucketClustering extends HoodieSparkClientTestHa
       throw new HoodieException("Cannot get comparator: unsupported data type, " + field.schema().getType());
     }
 
+    // Note: If row writer is used, it will throw: https://github.com/apache/hudi/issues/8838
+    // Use #readRecords() instead if row-writer is used in the future
     for (RecordReader recordReader: readers) {
       Object key = recordReader.createKey();
       ArrayWritable writable = (ArrayWritable) recordReader.createValue();
@@ -356,8 +358,7 @@ public class TestSparkConsistentBucketClustering extends HoodieSparkClientTestHa
         .withCompactionConfig(HoodieCompactionConfig.newBuilder().compactionSmallFileSize(1024 * 1024).build())
         .withStorageConfig(HoodieStorageConfig.newBuilder().hfileMaxFileSize(1024 * 1024).parquetMaxFileSize(1024 * 1024).build())
         .forTable("test-trip-table")
-        .withEmbeddedTimelineServerEnabled(true).withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder()
-            .withStorageType(FileSystemViewStorageType.EMBEDDED_KV_STORE).build());
+        .withEmbeddedTimelineServerEnabled(true);
   }
 
   private static Stream<Arguments> configParams() {

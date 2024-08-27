@@ -18,6 +18,8 @@
 
 package org.apache.hudi.utilities.sources.helpers;
 
+import org.apache.hudi.AvroConversionUtils;
+import org.apache.hudi.common.config.ConfigProperty;
 import org.apache.hudi.common.config.SerializableConfiguration;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.fs.FSUtils;
@@ -27,14 +29,19 @@ import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.utilities.config.CloudSourceConfig;
 import org.apache.hudi.utilities.config.S3EventsHoodieIncrSourceConfig;
+import org.apache.hudi.utilities.schema.SchemaProvider;
+import org.apache.hudi.utilities.sources.InputBatch;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.avro.Schema;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.MapPartitionsFunction;
 import org.apache.spark.sql.DataFrameReader;
 import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.slf4j.Logger;
@@ -48,11 +55,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import static org.apache.hudi.common.config.HoodieStorageConfig.PARQUET_MAX_FILE_SIZE;
 import static org.apache.hudi.common.util.CollectionUtils.isNullOrEmpty;
 import static org.apache.hudi.common.util.ConfigUtils.containsConfigProperty;
 import static org.apache.hudi.common.util.ConfigUtils.getStringWithAltKeys;
+import static org.apache.hudi.utilities.config.CloudSourceConfig.CLOUD_DATAFILE_EXTENSION;
+import static org.apache.hudi.utilities.config.CloudSourceConfig.IGNORE_RELATIVE_PATH_PREFIX;
+import static org.apache.hudi.utilities.config.CloudSourceConfig.IGNORE_RELATIVE_PATH_SUBSTR;
 import static org.apache.hudi.utilities.config.CloudSourceConfig.PATH_BASED_PARTITION_FIELDS;
+import static org.apache.hudi.utilities.config.CloudSourceConfig.SELECT_RELATIVE_PATH_PREFIX;
+import static org.apache.hudi.utilities.config.CloudSourceConfig.SPARK_DATASOURCE_READER_COMMA_SEPARATED_PATH_FORMAT;
+import static org.apache.hudi.utilities.config.S3EventsHoodieIncrSourceConfig.S3_FS_PREFIX;
+import static org.apache.hudi.utilities.config.S3EventsHoodieIncrSourceConfig.S3_IGNORE_KEY_PREFIX;
+import static org.apache.hudi.utilities.config.S3EventsHoodieIncrSourceConfig.S3_IGNORE_KEY_SUBSTRING;
+import static org.apache.hudi.utilities.config.S3EventsHoodieIncrSourceConfig.S3_KEY_PREFIX;
+import static org.apache.hudi.utilities.sources.helpers.IncrSourceHelper.coalesceOrRepartition;
 import static org.apache.spark.sql.functions.input_file_name;
 import static org.apache.spark.sql.functions.split;
 
@@ -64,6 +80,20 @@ import static org.apache.spark.sql.functions.split;
 public class CloudObjectsSelectorCommon {
 
   private static final Logger LOG = LoggerFactory.getLogger(CloudObjectsSelectorCommon.class);
+
+  public static final String S3_OBJECT_KEY = "s3.object.key";
+  public static final String S3_OBJECT_SIZE = "s3.object.size";
+  public static final String S3_BUCKET_NAME = "s3.bucket.name";
+  public static final String GCS_OBJECT_KEY = "name";
+  public static final String GCS_OBJECT_SIZE = "size";
+  private static final String SPACE_DELIMTER = " ";
+  private static final String GCS_PREFIX = "gs://";
+
+  private final TypedProperties properties;
+
+  public CloudObjectsSelectorCommon(TypedProperties properties) {
+    this.properties = properties;
+  }
 
   /**
    * Return a function that extracts filepaths from a list of Rows.
@@ -145,7 +175,79 @@ public class CloudObjectsSelectorCommon {
     }
   }
 
-  public static Option<Dataset<Row>> loadAsDataset(SparkSession spark, List<CloudObjectMetadata> cloudObjectMetadata, TypedProperties props, String fileFormat) {
+  public static String generateFilter(Type type,
+                                      TypedProperties props) {
+    String fileFormat = CloudDataFetcher.getFileFormat(props);
+    Option<String> selectRelativePathPrefix = getPropVal(props, SELECT_RELATIVE_PATH_PREFIX);
+    Option<String> ignoreRelativePathPrefix = getPropVal(props, IGNORE_RELATIVE_PATH_PREFIX);
+    Option<String> ignoreRelativePathSubStr = getPropVal(props, IGNORE_RELATIVE_PATH_SUBSTR);
+
+    String objectKey;
+    String objectSizeKey;
+    // This is for backwards compatibility of configs for s3.
+    if (type.equals(Type.S3)) {
+      objectKey = S3_OBJECT_KEY;
+      objectSizeKey = S3_OBJECT_SIZE;
+      selectRelativePathPrefix = selectRelativePathPrefix.or(() -> getPropVal(props, S3_KEY_PREFIX));
+      ignoreRelativePathPrefix = ignoreRelativePathPrefix.or(() -> getPropVal(props, S3_IGNORE_KEY_PREFIX));
+      ignoreRelativePathSubStr = ignoreRelativePathSubStr.or(() -> getPropVal(props, S3_IGNORE_KEY_SUBSTRING));
+    } else {
+      objectKey = GCS_OBJECT_KEY;
+      objectSizeKey = GCS_OBJECT_SIZE;
+    }
+
+    StringBuilder filter = new StringBuilder(String.format("%s > 0", objectSizeKey));
+    if (selectRelativePathPrefix.isPresent()) {
+      filter.append(SPACE_DELIMTER).append(String.format("and %s like '%s%%'", objectKey, selectRelativePathPrefix.get()));
+    }
+    if (ignoreRelativePathPrefix.isPresent()) {
+      filter.append(SPACE_DELIMTER).append(String.format("and %s not like '%s%%'", objectKey, ignoreRelativePathPrefix.get()));
+    }
+    if (ignoreRelativePathSubStr.isPresent()) {
+      filter.append(SPACE_DELIMTER).append(String.format("and %s not like '%%%s%%'", objectKey, ignoreRelativePathSubStr.get()));
+    }
+
+    // Match files with a given extension, or use the fileFormat as the default.
+    getPropVal(props, CLOUD_DATAFILE_EXTENSION).or(() -> Option.of(fileFormat))
+        .map(val -> filter.append(SPACE_DELIMTER).append(String.format("and %s like '%%%s'", objectKey, val)));
+
+    return filter.toString();
+  }
+
+  /**
+   * @param cloudObjectMetadataDF a Dataset that contains metadata of S3/GCS objects. Assumed to be a persisted form
+   *                              of a Cloud Storage SQS/PubSub Notification event.
+   * @param checkIfExists         Check if each file exists, before returning its full path
+   * @return A {@link List} of {@link CloudObjectMetadata} containing file info.
+   */
+  public static List<CloudObjectMetadata> getObjectMetadata(
+      Type type,
+      JavaSparkContext jsc,
+      Dataset<Row> cloudObjectMetadataDF,
+      boolean checkIfExists,
+      TypedProperties props
+  ) {
+    SerializableConfiguration serializableHadoopConf = new SerializableConfiguration(jsc.hadoopConfiguration());
+    if (type == Type.GCS) {
+      return cloudObjectMetadataDF
+          .select("bucket", "name", "size")
+          .distinct()
+          .mapPartitions(getCloudObjectMetadataPerPartition(GCS_PREFIX, serializableHadoopConf, checkIfExists), Encoders.kryo(CloudObjectMetadata.class))
+          .collectAsList();
+    } else if (type == Type.S3) {
+      String s3FS = getStringWithAltKeys(props, S3_FS_PREFIX, true).toLowerCase();
+      String s3Prefix = s3FS + "://";
+      return cloudObjectMetadataDF
+          .select(CloudObjectsSelectorCommon.S3_BUCKET_NAME, CloudObjectsSelectorCommon.S3_OBJECT_KEY, CloudObjectsSelectorCommon.S3_OBJECT_SIZE)
+          .distinct()
+          .mapPartitions(getCloudObjectMetadataPerPartition(s3Prefix, serializableHadoopConf, checkIfExists), Encoders.kryo(CloudObjectMetadata.class))
+          .collectAsList();
+    }
+    throw new UnsupportedOperationException("Invalid cloud type " + type);
+  }
+
+  public Option<Dataset<Row>> loadAsDataset(SparkSession spark, List<CloudObjectMetadata> cloudObjectMetadata,
+                                            String fileFormat, Option<SchemaProvider> schemaProviderOption, int numPartitions) {
     if (LOG.isDebugEnabled()) {
       LOG.debug("Extracted distinct files " + cloudObjectMetadata.size()
           + " and some samples " + cloudObjectMetadata.stream().map(CloudObjectMetadata::getPath).limit(10).collect(Collectors.toList()));
@@ -155,10 +257,16 @@ public class CloudObjectsSelectorCommon {
       return Option.empty();
     }
     DataFrameReader reader = spark.read().format(fileFormat);
-    String datasourceOpts = getStringWithAltKeys(props, CloudSourceConfig.SPARK_DATASOURCE_OPTIONS, true);
+    String datasourceOpts = getStringWithAltKeys(properties, CloudSourceConfig.SPARK_DATASOURCE_OPTIONS, true);
+    if (schemaProviderOption.isPresent()) {
+      Schema sourceSchema = schemaProviderOption.get().getSourceSchema();
+      if (sourceSchema != null && !sourceSchema.equals(InputBatch.NULL_SCHEMA)) {
+        reader = reader.schema(AvroConversionUtils.convertAvroSchemaToStructType(sourceSchema));
+      }
+    }
     if (StringUtils.isNullOrEmpty(datasourceOpts)) {
       // fall back to legacy config for BWC. TODO consolidate in HUDI-6020
-      datasourceOpts = getStringWithAltKeys(props, S3EventsHoodieIncrSourceConfig.SPARK_DATASOURCE_OPTIONS, true);
+      datasourceOpts = getStringWithAltKeys(properties, S3EventsHoodieIncrSourceConfig.SPARK_DATASOURCE_OPTIONS, true);
     }
     if (StringUtils.nonEmpty(datasourceOpts)) {
       final ObjectMapper mapper = new ObjectMapper();
@@ -172,20 +280,21 @@ public class CloudObjectsSelectorCommon {
       reader = reader.options(sparkOptionsMap);
     }
     List<String> paths = new ArrayList<>();
-    long totalSize = 0;
     for (CloudObjectMetadata o : cloudObjectMetadata) {
       paths.add(o.getPath());
-      totalSize += o.getSize();
     }
-    // inflate 10% for potential hoodie meta fields
-    totalSize *= 1.1;
-    long parquetMaxFileSize = props.getLong(PARQUET_MAX_FILE_SIZE.key(), Long.parseLong(PARQUET_MAX_FILE_SIZE.defaultValue()));
-    int numPartitions = (int) Math.max(totalSize / parquetMaxFileSize, 1);
-    Dataset<Row> dataset = reader.load(paths.toArray(new String[cloudObjectMetadata.size()])).coalesce(numPartitions);
+    boolean isCommaSeparatedPathFormat = properties.getBoolean(SPARK_DATASOURCE_READER_COMMA_SEPARATED_PATH_FORMAT.key(), false);
+
+    Dataset<Row> dataset;
+    if (isCommaSeparatedPathFormat) {
+      dataset = reader.load(String.join(",", paths));
+    } else {
+      dataset = reader.load(paths.toArray(new String[cloudObjectMetadata.size()]));
+    }
 
     // add partition column from source path if configured
-    if (containsConfigProperty(props, PATH_BASED_PARTITION_FIELDS)) {
-      String[] partitionKeysToAdd = getStringWithAltKeys(props, PATH_BASED_PARTITION_FIELDS).split(",");
+    if (containsConfigProperty(properties, PATH_BASED_PARTITION_FIELDS)) {
+      String[] partitionKeysToAdd = getStringWithAltKeys(properties, PATH_BASED_PARTITION_FIELDS).split(",");
       // Add partition column for all path-based partition keys. If key is not present in path, the value will be null.
       for (String partitionKey : partitionKeysToAdd) {
         String partitionPathPattern = String.format("%s=", partitionKey);
@@ -193,6 +302,21 @@ public class CloudObjectsSelectorCommon {
         dataset = dataset.withColumn(partitionKey, split(split(input_file_name(), partitionPathPattern).getItem(1), "/").getItem(0));
       }
     }
+    dataset = coalesceOrRepartition(dataset, numPartitions);
     return Option.of(dataset);
+  }
+
+  private static Option<String> getPropVal(TypedProperties props, ConfigProperty<String> configProperty) {
+    String value = getStringWithAltKeys(props, configProperty, true);
+    if (!StringUtils.isNullOrEmpty(value)) {
+      return Option.of(value);
+    }
+
+    return Option.empty();
+  }
+
+  public enum Type {
+    S3,
+    GCS
   }
 }

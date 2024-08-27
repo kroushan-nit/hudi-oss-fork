@@ -29,7 +29,7 @@
   <groupId>org.apache.hudi</groupId>
   <artifactId>hudi</artifactId>
   <packaging>pom</packaging>
-  <version>0.14.0-SNAPSHOT</version>
+  <version>0.14.1-rc2</version>
   <description>Apache Hudi brings stream style processing on big data</description>
   <url>https://github.com/apache/hudi</url>
   <name>Hudi</name>
@@ -99,25 +99,26 @@
     <fasterxml.jackson.module.scala.version>${fasterxml.spark3.version}</fasterxml.jackson.module.scala.version>
     <fasterxml.jackson.dataformat.yaml.version>${fasterxml.spark3.version}</fasterxml.jackson.dataformat.yaml.version>
     <kafka.version>2.0.0</kafka.version>
-    <kafka.spark3.version>2.8.0</kafka.spark3.version>
+    <kafka.spark3.version>2.8.2</kafka.spark3.version>
+    <kafka.connect.version>2.5.0</kafka.connect.version>
     <pulsar.version>2.8.1</pulsar.version>
     <pulsar.spark.version>${pulsar.spark.scala12.version}</pulsar.spark.version>
     <pulsar.spark.scala11.version>2.4.5</pulsar.spark.scala11.version>
     <pulsar.spark.scala12.version>3.1.1.4</pulsar.spark.scala12.version>
-    <confluent.version>5.3.4</confluent.version>
+    <confluent.version>5.5.0</confluent.version>
     <glassfish.version>2.17</glassfish.version>
     <glassfish.el.version>3.0.1-b12</glassfish.el.version>
     <parquet.version>1.10.1</parquet.version>
     <junit.jupiter.version>5.7.2</junit.jupiter.version>
     <junit.vintage.version>5.7.2</junit.vintage.version>
     <junit.platform.version>1.7.2</junit.platform.version>
-    <mockito.jupiter.version>3.3.3</mockito.jupiter.version>
+    <mockito.jupiter.version>3.12.4</mockito.jupiter.version>
     <log4j2.version>2.17.2</log4j2.version>
     <slf4j.version>1.7.36</slf4j.version>
     <joda.version>2.9.9</joda.version>
-    <hadoop.version>2.10.1</hadoop.version>
+    <hadoop.version>2.10.2</hadoop.version>
     <hive.groupid>org.apache.hive</hive.groupid>
-    <hive.version>2.3.1</hive.version>
+    <hive.version>2.3.4</hive.version>
     <hive.parquet.version>1.10.1</hive.parquet.version>
     <hive.avro.version>1.8.2</hive.avro.version>
     <presto.version>0.273</presto.version>
@@ -203,7 +204,7 @@
     <spark.bundle.hive.shade.prefix/>
     <utilities.bundle.hive.scope>provided</utilities.bundle.hive.scope>
     <utilities.bundle.hive.shade.prefix/>
-    <argLine>-Xmx2g</argLine>
+    <argLine>-Xmx2g -Xms128m</argLine>
     <jacoco.version>0.8.8</jacoco.version>
     <presto.bundle.bootstrap.scope>compile</presto.bundle.bootstrap.scope>
     <presto.bundle.bootstrap.shade.prefix>org.apache.hudi.</presto.bundle.bootstrap.shade.prefix>
@@ -213,7 +214,7 @@
     <zk-curator.version>2.7.1</zk-curator.version>
     <disruptor.version>3.4.2</disruptor.version>
     <antlr.version>4.8</antlr.version>
-    <aws.sdk.version>2.18.40</aws.sdk.version>
+    <aws.sdk.version>2.25.69</aws.sdk.version>
     <proto.version>3.21.7</proto.version>
     <protoc.version>3.21.5</protoc.version>
     <dynamodb.lockclient.version>1.2.0</dynamodb.lockclient.version>
@@ -226,6 +227,14 @@
     <springboot.version>2.7.3</springboot.version>
     <spring.shell.version>2.1.1</spring.shell.version>
     <snappy.version>1.1.8.3</snappy.version>
+
+    <sonar.projectKey>onehouseinc_hudi-internal</sonar.projectKey>
+    <sonar.organization>onehouseinc</sonar.organization>
+    <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+    <sonar.scm.provider>git</sonar.scm.provider>
+    <sonar.verbose>true</sonar.verbose>
+    <sonar.java.binaries>**/*</sonar.java.binaries>
+    <sonar.project.monorepo.enabled>true</sonar.project.monorepo.enabled>
   </properties>
 
   <scm>
@@ -279,18 +288,17 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-checkstyle-plugin</artifactId>
-        <version>3.1.0</version>
+        <version>3.2.2</version>
         <dependencies>
           <dependency>
             <groupId>com.puppycrawl.tools</groupId>
             <artifactId>checkstyle</artifactId>
-            <version>8.18</version>
+            <version>9.3</version>
           </dependency>
         </dependencies>
         <configuration>
           <!-- Set consoleOutput to true to see minor checkstyle issues -->
           <consoleOutput>false</consoleOutput>
-          <encoding>UTF-8</encoding>
           <configLocation>style/checkstyle.xml</configLocation>
           <suppressionsLocation>style/checkstyle-suppressions.xml</suppressionsLocation>
           <suppressionsFileExpression>checkstyle.suppressions.file</suppressionsFileExpression>
@@ -383,6 +391,9 @@
           <skip>${skipITs}</skip>
           <argLine>@{argLine}</argLine>
           <useSystemClassLoader>false</useSystemClassLoader>
+          <systemPropertyVariables>
+            <log4j.configurationFile>${surefire-log4j.file}</log4j.configurationFile>
+          </systemPropertyVariables>
         </configuration>
       </plugin>
       <plugin>
@@ -466,6 +477,8 @@
               <include>org.apache.hbase.thirdparty:hbase-shaded-netty</include>
               <include>org.apache.hbase.thirdparty:hbase-shaded-protobuf</include>
               <include>org.apache.htrace:htrace-core4</include>
+              <!-- afterburner module for jackson performance -->
+              <include>com.fasterxml.jackson.module:jackson-module-afterburner</include>
             </includes>
           </artifactSet>
           <relocations>
@@ -559,6 +572,11 @@
             <relocation>
               <pattern>org.apache.hadoop.metrics2.util.MetricSampleQuantiles</pattern>
               <shadedPattern>org.apache.hudi.org.apache.hadoop.metrics2.util.MetricSampleQuantiles
+              </shadedPattern>
+            </relocation>
+            <relocation>
+              <pattern>com.fasterxml.jackson.module</pattern>
+              <shadedPattern>org.apache.hudi.com.fasterxml.jackson.module
               </shadedPattern>
             </relocation>
           </relocations>
@@ -664,6 +682,7 @@
               <exclude>NOTICE</exclude>
               <exclude>DISCLAIMER</exclude>
               <exclude>**/.*</exclude>
+              <exclude>**/emptyFile</exclude>
               <exclude>**/*.json</exclude>
               <exclude>**/*.hfile</exclude>
               <exclude>**/*.log</exclude>
@@ -865,6 +884,18 @@
         <groupId>com.fasterxml.jackson.module</groupId>
         <artifactId>jackson-module-scala_${scala.binary.version}</artifactId>
         <version>${fasterxml.jackson.module.scala.version}</version>
+      </dependency>
+      <!-- Provides performance improvements with json serialization/deserialization -->
+      <dependency>
+        <groupId>com.fasterxml.jackson.module</groupId>
+        <artifactId>jackson-module-afterburner</artifactId>
+        <version>${fasterxml.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>com.fasterxml.jackson.module</groupId>
+        <artifactId>jackson-module-afterburner</artifactId>
+        <version>${fasterxml.jackson.databind.version}</version>
       </dependency>
 
       <!-- Glassfish -->
@@ -1711,8 +1742,29 @@
           </exclusion>
         </exclusions>
       </dependency>
+
+      <!-- Kafka Connect -->
+      <dependency>
+        <groupId>org.apache.kafka</groupId>
+        <artifactId>connect-api</artifactId>
+        <version>${kafka.connect.version}</version>
+      </dependency>
     </dependencies>
   </dependencyManagement>
+
+  <distributionManagement>
+    <repository>
+      <id>codeartifact</id>
+      <name>codeartifact</name>
+      <url>https://onehouse-194159489498.d.codeartifact.us-west-2.amazonaws.com/maven/onehouse-internal/</url>
+    </repository>
+    <snapshotRepository>
+      <id>codeartifact</id>
+      <name>codeartifact</name>
+      <url>https://onehouse-194159489498.d.codeartifact.us-west-2.amazonaws.com/maven/onehouse-internal/</url>
+    </snapshotRepository>
+  </distributionManagement>
+
   <repositories>
     <repository>
       <id>Maven Central</id>
@@ -1962,8 +2014,10 @@
               </includes>
               <systemPropertyVariables>
                 <dynamodb-local.endpoint>${dynamodb-local.endpoint}</dynamodb-local.endpoint>
+                <log4j.configurationFile>${surefire-log4j.file}</log4j.configurationFile>
               </systemPropertyVariables>
               <useSystemClassLoader>false</useSystemClassLoader>
+              <forkedProcessExitTimeoutInSeconds>30</forkedProcessExitTimeoutInSeconds>
             </configuration>
             <executions>
               <execution>
@@ -2167,7 +2221,7 @@
         <avro.version>1.8.2</avro.version>
         <antlr.version>4.7</antlr.version>
         <fasterxml.version>2.6.7</fasterxml.version>
-        <fasterxml.jackson.databind.version>2.6.7.3</fasterxml.jackson.databind.version>
+        <fasterxml.jackson.databind.version>${fasterxml.version}</fasterxml.jackson.databind.version>
         <fasterxml.jackson.module.scala.version>2.6.7.1</fasterxml.jackson.module.scala.version>
         <fasterxml.jackson.dataformat.yaml.version>2.7.4</fasterxml.jackson.dataformat.yaml.version>
         <skip.hudi-spark3.unit.tests>true</skip.hudi-spark3.unit.tests>
@@ -2199,7 +2253,7 @@
         <avro.version>1.8.2</avro.version>
         <antlr.version>4.7</antlr.version>
         <fasterxml.version>2.6.7</fasterxml.version>
-        <fasterxml.jackson.databind.version>2.6.7.3</fasterxml.jackson.databind.version>
+        <fasterxml.jackson.databind.version>${fasterxml.version}</fasterxml.jackson.databind.version>
         <fasterxml.jackson.module.scala.version>2.6.7.1</fasterxml.jackson.module.scala.version>
         <fasterxml.jackson.dataformat.yaml.version>2.7.4</fasterxml.jackson.dataformat.yaml.version>
         <skip.hudi-spark3.unit.tests>true</skip.hudi-spark3.unit.tests>
@@ -2215,7 +2269,6 @@
       <id>m1-mac</id>
       <properties>
         <spark2.version>2.4.8</spark2.version>
-        <rocksdbjni.version>6.29.4.1</rocksdbjni.version>
       </properties>
       <activation>
         <os>

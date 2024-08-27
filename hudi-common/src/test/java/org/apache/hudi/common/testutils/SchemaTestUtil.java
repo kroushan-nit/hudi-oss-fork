@@ -38,6 +38,7 @@ import org.apache.avro.io.DecoderFactory;
 import org.apache.avro.util.Utf8;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
@@ -70,14 +71,23 @@ public final class SchemaTestUtil {
 
   private final Random random = new Random(0xDEED);
 
-  public SchemaTestUtil() {}
+  public SchemaTestUtil() {
+  }
 
   public static Schema getSimpleSchema() throws IOException {
     return new Schema.Parser().parse(SchemaTestUtil.class.getResourceAsStream("/simple-test.avsc"));
   }
 
+  public static Schema getSchema(String path) throws IOException {
+    return new Schema.Parser().parse(SchemaTestUtil.class.getResourceAsStream(path));
+  }
+
   public static List<IndexedRecord> generateTestRecords(int from, int limit) throws IOException, URISyntaxException {
     return toRecords(getSimpleSchema(), getSimpleSchema(), from, limit);
+  }
+
+  public static List<IndexedRecord> generateTestRecords(String schemaPath, String dataPath) throws IOException, URISyntaxException {
+    return toRecords(getSchema(schemaPath), getSchema(schemaPath), dataPath);
   }
 
   public static List<GenericRecord> generateTestGenericRecords(int from, int limit) throws IOException, URISyntaxException {
@@ -112,6 +122,24 @@ public final class SchemaTestUtil {
     }
   }
 
+  private static <T extends IndexedRecord> List<T> toRecords(Schema writerSchema, Schema readerSchema, String path)
+      throws IOException, URISyntaxException {
+    GenericDatumReader<T> reader = new GenericDatumReader<>(writerSchema, readerSchema);
+    Path dataPath = initializeSampleDataPath(path);
+
+    try (Stream<String> stream = Files.lines(dataPath)) {
+      return stream.map(s -> {
+        try {
+          return reader.read(null, DecoderFactory.get().jsonDecoder(writerSchema, s));
+        } catch (IOException e) {
+          throw new HoodieIOException("Could not read data from " + path, e);
+        }
+      }).collect(Collectors.toList());
+    } catch (IOException e) {
+      throw new HoodieIOException("Could not read data from " + path, e);
+    }
+  }
+
   /**
    * Required to register the necessary JAR:// file system.
    * @return Path to the sample data in the resource file.
@@ -124,6 +152,15 @@ public final class SchemaTestUtil {
       return uriToPath(resource);
     } else {
       return Paths.get(SchemaTestUtil.class.getResource(RESOURCE_SAMPLE_DATA).toURI());
+    }
+  }
+
+  private static Path initializeSampleDataPath(String path) throws IOException, URISyntaxException {
+    URI resource = SchemaTestUtil.class.getResource(path).toURI();
+    if (resource.toString().contains("!")) {
+      return uriToPath(resource);
+    } else {
+      return Paths.get(SchemaTestUtil.class.getResource(path).toURI());
     }
   }
 
@@ -272,8 +309,8 @@ public final class SchemaTestUtil {
   }
 
   public static Schema getSchemaFromResource(Class<?> clazz, String name, boolean withHoodieMetadata) {
-    try {
-      Schema schema = new Schema.Parser().parse(clazz.getResourceAsStream(name));
+    try (InputStream schemaInputStream = clazz.getResourceAsStream(name)) {
+      Schema schema = new Schema.Parser().parse(schemaInputStream);
       return withHoodieMetadata ? HoodieAvroUtils.addMetadataFields(schema) : schema;
     } catch (IOException e) {
       throw new RuntimeException(String.format("Failed to get schema from resource `%s` for class `%s`", name, clazz.getName()));

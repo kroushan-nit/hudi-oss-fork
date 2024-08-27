@@ -128,7 +128,9 @@ public class CompactionUtil {
    */
   public static void setPreCombineField(Configuration conf, HoodieTableMetaClient metaClient) {
     String preCombineField = metaClient.getTableConfig().getPreCombineField();
-    conf.setString(FlinkOptions.PRECOMBINE_FIELD, preCombineField);
+    if (preCombineField != null) {
+      conf.setString(FlinkOptions.PRECOMBINE_FIELD, preCombineField);
+    }
   }
 
   /**
@@ -139,7 +141,7 @@ public class CompactionUtil {
    * @param conf The configuration
    * @param metaClient The meta client
    */
-  public static void inferChangelogMode(Configuration conf, HoodieTableMetaClient metaClient) {
+  public static void inferChangelogMode(Configuration conf, HoodieTableMetaClient metaClient) throws Exception {
     TableSchemaResolver tableSchemaResolver = new TableSchemaResolver(metaClient);
     Schema tableAvroSchema = tableSchemaResolver.getTableAvroSchemaFromDataFile();
     if (tableAvroSchema.getField(HoodieRecord.OPERATION_METADATA_FIELD) != null) {

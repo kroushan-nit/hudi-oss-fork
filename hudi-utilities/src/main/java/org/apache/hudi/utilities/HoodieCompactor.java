@@ -26,10 +26,10 @@ import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.config.HoodieCleanConfig;
+import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.compact.strategy.LogFileSizeBasedCompactionStrategy;
 
@@ -37,7 +37,6 @@ import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import org.apache.avro.Schema;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.slf4j.Logger;
@@ -61,23 +60,20 @@ public class HoodieCompactor {
   private final HoodieTableMetaClient metaClient;
 
   public HoodieCompactor(JavaSparkContext jsc, Config cfg) {
+    this(jsc, cfg, UtilHelpers.buildProperties(jsc.hadoopConfiguration(), cfg.propsFilePath, cfg.configs));
+  }
+
+  public HoodieCompactor(JavaSparkContext jsc, Config cfg, TypedProperties props) {
     this.cfg = cfg;
     this.jsc = jsc;
-    this.props = cfg.propsFilePath == null
-        ? UtilHelpers.buildProperties(cfg.configs)
-        : readConfigFromFileSystem(jsc, cfg);
+    this.props = props;
+    this.metaClient = UtilHelpers.createMetaClient(jsc, cfg.basePath, true);
     // Disable async cleaning, will trigger synchronous cleaning manually.
     this.props.put(HoodieCleanConfig.ASYNC_CLEAN.key(), false);
-    this.metaClient = UtilHelpers.createMetaClient(jsc, cfg.basePath, true);
     if (this.metaClient.getTableConfig().isMetadataTableAvailable()) {
       // add default lock config options if MDT is enabled.
       UtilHelpers.addLockOptions(cfg.basePath, this.props);
     }
-  }
-
-  private TypedProperties readConfigFromFileSystem(JavaSparkContext jsc, Config cfg) {
-    return UtilHelpers.readConfig(jsc.hadoopConfiguration(), new Path(cfg.propsFilePath), cfg.configs)
-        .getProps(true);
   }
 
   public static class Config implements Serializable {
@@ -172,19 +168,15 @@ public class HoodieCompactor {
     JCommander cmd = new JCommander(cfg, null, args);
     if (cfg.help || args.length == 0) {
       cmd.usage();
-      System.exit(1);
+      throw new HoodieException("Fail to run compaction for " + cfg.tableName + ", return code: " + 1);
     }
     final JavaSparkContext jsc = UtilHelpers.buildSparkContext("compactor-" + cfg.tableName, cfg.sparkMaster, cfg.sparkMemory);
-    int ret = 0;
-    try {
-      HoodieCompactor compactor = new HoodieCompactor(jsc, cfg);
-      ret = compactor.compact(cfg.retry);
-    } catch (Throwable throwable) {
-      LOG.error("Fail to run compaction for " + cfg.tableName, throwable);
-    } finally {
-      jsc.stop();
-      System.exit(ret);
+    int ret = new HoodieCompactor(jsc, cfg).compact(cfg.retry);
+    if (ret != 0) {
+      throw new HoodieException("Fail to run compaction for " + cfg.tableName + ", return code: " + ret);
     }
+    LOG.info("Success to run compaction for " + cfg.tableName);
+    jsc.stop();
   }
 
   public int compact(int retry) {
@@ -262,9 +254,7 @@ public class HoodieCompactor {
       // instant from the active timeline
       if (StringUtils.isNullOrEmpty(cfg.compactionInstantTime)) {
         HoodieTableMetaClient metaClient = UtilHelpers.createMetaClient(jsc, cfg.basePath, true);
-        Option<HoodieInstant> firstCompactionInstant =
-            metaClient.getActiveTimeline().firstInstant(
-                HoodieTimeline.COMPACTION_ACTION, HoodieInstant.State.REQUESTED);
+        Option<HoodieInstant> firstCompactionInstant = metaClient.getActiveTimeline().filterPendingCompactionTimeline().firstInstant();
         if (firstCompactionInstant.isPresent()) {
           cfg.compactionInstantTime = firstCompactionInstant.get().getTimestamp();
           LOG.info("Found the earliest scheduled compaction instant which will be executed: "

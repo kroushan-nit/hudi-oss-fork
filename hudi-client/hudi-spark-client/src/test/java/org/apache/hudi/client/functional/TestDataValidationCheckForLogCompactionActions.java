@@ -32,7 +32,6 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
-import org.apache.hudi.common.table.view.FileSystemViewStorageType;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.testutils.RawTripTestPayload;
@@ -166,7 +165,8 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
       }
       curr++;
     }
-
+    mainTable.client.close();
+    experimentTable.client.close();
   }
 
   private void verifyRecords(TestTableContents mainTable, TestTableContents experimentTable) {
@@ -406,8 +406,7 @@ public class TestDataValidationCheckForLogCompactionActions extends HoodieClient
         .withIndexConfig(HoodieIndexConfig.newBuilder().withIndexType(indexType).build())
         .withEmbeddedTimelineServerEnabled(true).withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder()
             .withEnableBackupForRemoteFileSystemView(false) // Fail test if problem connecting to timeline-server
-            .withRemoteServerPort(timelineServicePort)
-            .withStorageType(FileSystemViewStorageType.EMBEDDED_KV_STORE).build())
+            .withRemoteServerPort(timelineServicePort).build())
         .withProperties(properties);
   }
 

@@ -42,6 +42,7 @@ public class HoodieConfig implements Serializable {
   private static final Logger LOG = LoggerFactory.getLogger(HoodieConfig.class);
 
   protected static final String CONFIG_VALUES_DELIMITER = ",";
+  public static final String BASE_PATH_KEY = "hoodie.base.path";
 
   protected TypedProperties props;
 
@@ -160,7 +161,7 @@ public class HoodieConfig implements Serializable {
   public <T> Integer getIntOrDefault(ConfigProperty<T> configProperty) {
     Option<Object> rawValue = getRawValue(configProperty);
     return rawValue.map(v -> Integer.parseInt(v.toString()))
-        .orElse(Integer.parseInt(configProperty.defaultValue().toString()));
+        .orElseGet(() -> Integer.parseInt(configProperty.defaultValue().toString()));
   }
 
   public <T> Boolean getBoolean(ConfigProperty<T> configProperty) {
@@ -229,7 +230,7 @@ public class HoodieConfig implements Serializable {
   }
 
   public TypedProperties getProps() {
-    return getProps(false);
+    return props;
   }
 
   public TypedProperties getProps(boolean includeGlobalProps) {

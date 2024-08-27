@@ -24,6 +24,7 @@ import org.apache.hudi.common.config.SerializableConfiguration;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.fs.FSUtils;
+import org.apache.hudi.common.fs.HoodieSerializableFileStatus;
 import org.apache.hudi.common.model.HoodiePartitionMetadata;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordGlobalLocation;
@@ -50,6 +51,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -66,6 +68,7 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
 
   private final boolean hiveStylePartitioningEnabled;
   private final boolean urlEncodePartitioningEnabled;
+  private transient FileSystem fs;
 
   public FileSystemBackedTableMetadata(HoodieEngineContext engineContext, HoodieTableConfig tableConfig,
                                        SerializableConfiguration conf, String datasetBasePath,
@@ -82,13 +85,19 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
                                        boolean assumeDatePartitioning) {
     super(engineContext, conf, datasetBasePath);
 
-    FileSystem fs = FSUtils.getFs(dataBasePath.get(), conf.get());
     Path metaPath = new Path(dataBasePath.get(), HoodieTableMetaClient.METAFOLDER_NAME);
-    TableNotFoundException.checkTableValidity(fs, this.dataBasePath.get(), metaPath);
-    HoodieTableConfig tableConfig = new HoodieTableConfig(fs, metaPath.toString(), null, null);
+    TableNotFoundException.checkTableValidity(getFs(), this.dataBasePath.get(), metaPath);
+    HoodieTableConfig tableConfig = new HoodieTableConfig(getFs(), metaPath.toString(), null, null);
     this.hiveStylePartitioningEnabled = Boolean.parseBoolean(tableConfig.getHiveStylePartitioningEnable());
     this.urlEncodePartitioningEnabled = Boolean.parseBoolean(tableConfig.getUrlEncodePartitioning());
     this.assumeDatePartitioning = assumeDatePartitioning;
+  }
+
+  private FileSystem getFs() {
+    if (fs == null) {
+      fs = FSUtils.getFs(dataBasePath.toString(), hadoopConf.get());
+    }
+    return fs;
   }
 
   @Override
@@ -169,9 +178,10 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
 
       // List all directories in parallel
       engineContext.setJobStatus(this.getClass().getSimpleName(), "Listing all partitions with prefix " + relativePathPrefix);
-      List<FileStatus> dirToFileListing = engineContext.flatMap(pathsToList, path -> {
+      // Need to use serializable file status here, see HUDI-5936
+      List<HoodieSerializableFileStatus> dirToFileListing = engineContext.flatMap(pathsToList, path -> {
         FileSystem fileSystem = path.getFileSystem(hadoopConf.get());
-        return Arrays.stream(fileSystem.listStatus(path));
+        return Arrays.stream(HoodieSerializableFileStatus.fromFileStatuses(fileSystem.listStatus(path)));
       }, listingParallelism);
       pathsToList.clear();
 
@@ -183,15 +193,16 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
         // and second entry holds optionally a directory path to be processed further.
         engineContext.setJobStatus(this.getClass().getSimpleName(), "Processing listed partitions");
         List<Pair<Option<String>, Option<Path>>> result = engineContext.map(dirToFileListing, fileStatus -> {
-          FileSystem fileSystem = fileStatus.getPath().getFileSystem(hadoopConf.get());
+          Path path = fileStatus.getPath();
+          FileSystem fileSystem = path.getFileSystem(hadoopConf.get());
           if (fileStatus.isDirectory()) {
-            if (HoodiePartitionMetadata.hasPartitionMetadata(fileSystem, fileStatus.getPath())) {
-              return Pair.of(Option.of(FSUtils.getRelativePartitionPath(dataBasePath.get(), fileStatus.getPath())), Option.empty());
-            } else if (!fileStatus.getPath().getName().equals(HoodieTableMetaClient.METAFOLDER_NAME)) {
-              return Pair.of(Option.empty(), Option.of(fileStatus.getPath()));
+            if (HoodiePartitionMetadata.hasPartitionMetadata(fileSystem, path)) {
+              return Pair.of(Option.of(FSUtils.getRelativePartitionPath(dataBasePath.get(), path)), Option.empty());
+            } else if (!path.getName().equals(HoodieTableMetaClient.METAFOLDER_NAME)) {
+              return Pair.of(Option.empty(), Option.of(path));
             }
-          } else if (fileStatus.getPath().getName().startsWith(HoodiePartitionMetadata.HOODIE_PARTITION_METAFILE_PREFIX)) {
-            String partitionName = FSUtils.getRelativePartitionPath(dataBasePath.get(), fileStatus.getPath().getParent());
+          } else if (path.getName().startsWith(HoodiePartitionMetadata.HOODIE_PARTITION_METAFILE_PREFIX)) {
+            String partitionName = FSUtils.getRelativePartitionPath(dataBasePath.get(), path.getParent());
             return Pair.of(Option.of(partitionName), Option.empty());
           }
           return Pair.of(Option.empty(), Option.empty());
@@ -224,7 +235,7 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
         pathsToList.addAll(result.stream().filter(entry -> entry.getValue().isPresent()).map(entry -> entry.getValue().get())
             .filter(path -> partialBoundExpr instanceof Predicates.TrueExpression
                 || (Boolean) partialBoundExpr.eval(
-                extractPartitionValues(partitionFields, FSUtils.getRelativePartitionPath(dataBasePath.get(), path), urlEncodePartitioningEnabled)))
+                    extractPartitionValues(partitionFields, FSUtils.getRelativePartitionPath(dataBasePath.get(), path), urlEncodePartitioningEnabled)))
             .collect(Collectors.toList()));
       }
     }
@@ -241,13 +252,14 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
     int parallelism = Math.min(DEFAULT_LISTING_PARALLELISM, partitionPaths.size());
 
     engineContext.setJobStatus(this.getClass().getSimpleName(), "Listing all files in " + partitionPaths.size() + " partitions");
-    List<Pair<String, FileStatus[]>> partitionToFiles = engineContext.map(new ArrayList<>(partitionPaths), partitionPathStr -> {
+    // Need to use serializable file status here, see HUDI-5936
+    List<Pair<String, HoodieSerializableFileStatus[]>> partitionToFiles = engineContext.map(new ArrayList<>(partitionPaths), partitionPathStr -> {
       Path partitionPath = new Path(partitionPathStr);
       FileSystem fs = partitionPath.getFileSystem(hadoopConf.get());
-      return Pair.of(partitionPathStr, FSUtils.getAllDataFilesInPartition(fs, partitionPath));
+      return Pair.of(partitionPathStr, HoodieSerializableFileStatus.fromFileStatuses(FSUtils.getAllDataFilesInPartition(fs, partitionPath)));
     }, parallelism);
 
-    return partitionToFiles.stream().collect(Collectors.toMap(Pair::getLeft, Pair::getRight));
+    return partitionToFiles.stream().collect(Collectors.toMap(Pair::getLeft, pair -> HoodieSerializableFileStatus.toFileStatuses(pair.getRight())));
   }
 
   @Override
@@ -300,5 +312,28 @@ public class FileSystemBackedTableMetadata extends AbstractHoodieTableMetadata {
   @Override
   public int getNumFileGroupsForPartition(MetadataPartitionType partition) {
     throw new HoodieMetadataException("Unsupported operation: getNumFileGroupsForPartition");
+  }
+
+  @Override
+  public Map<Pair<String, Path>, FileStatus[]> listPartitions(List<Pair<String, Path>> partitionPathList) throws IOException {
+    Map<Pair<String, Path>, FileStatus[]> fileStatusMap = new HashMap<>();
+
+    for (Pair<String, Path> partitionPair : partitionPathList) {
+      Path absolutePartitionPath = partitionPair.getRight();
+      try {
+        fileStatusMap.put(partitionPair, getFs().listStatus(absolutePartitionPath));
+      } catch (IOException e) {
+        // Create the path if it does not exist already
+        if (!getFs().exists(absolutePartitionPath)) {
+          getFs().mkdirs(absolutePartitionPath);
+          fileStatusMap.put(partitionPair, new FileStatus[0]);
+        } else {
+          // in case the partition path was created by another caller
+          fileStatusMap.put(partitionPair, getFs().listStatus(absolutePartitionPath));
+        }
+      }
+    }
+
+    return fileStatusMap;
   }
 }

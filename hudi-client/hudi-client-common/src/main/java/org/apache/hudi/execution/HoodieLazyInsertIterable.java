@@ -18,7 +18,6 @@
 
 package org.apache.hudi.execution;
 
-import org.apache.avro.Schema;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.utils.LazyIterableIterator;
 import org.apache.hudi.common.engine.TaskContextSupplier;
@@ -29,9 +28,10 @@ import org.apache.hudi.io.WriteHandleFactory;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.util.ExecutorFactory;
 
+import org.apache.avro.Schema;
+
 import java.util.Iterator;
 import java.util.List;
-import java.util.Properties;
 import java.util.function.Function;
 
 /**
@@ -77,12 +77,10 @@ public abstract class HoodieLazyInsertIterable<T>
   public static class HoodieInsertValueGenResult<R extends HoodieRecord> {
     private final R record;
     public final Schema schema;
-    public final Properties props;
 
-    public HoodieInsertValueGenResult(R record, Schema schema, Properties properties) {
+    public HoodieInsertValueGenResult(R record, Schema schema) {
       this.record = record;
       this.schema = schema;
-      this.props = properties;
     }
 
     public R getResult() {
@@ -112,15 +110,17 @@ public abstract class HoodieLazyInsertIterable<T>
 
     return record -> {
       HoodieRecord<T> clonedRecord = shouldClone ? record.copy() : record;
-      return new HoodieInsertValueGenResult(clonedRecord, schema, writeConfig.getProps());
+      return new HoodieInsertValueGenResult(clonedRecord, schema);
     };
   }
 
   @Override
-  protected void start() {}
+  protected void start() {
+  }
 
   @Override
-  protected void end() {}
+  protected void end() {
+  }
 
   protected CopyOnWriteInsertHandler getInsertHandler() {
     return new CopyOnWriteInsertHandler(hoodieConfig, instantTime, areRecordsSorted, hoodieTable, idPrefix,

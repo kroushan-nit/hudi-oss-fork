@@ -128,7 +128,9 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
   // use writer schema for log compaction.
   private boolean useWriterSchema = false;
 
-  private Properties recordProperties = new Properties();
+  private final Properties recordProperties = new Properties();
+  // maintains backwards compataible writes so that 0.13.x and 0.12.x hudi can read the logs produced by 0.14.x
+  private boolean maintainBackwardsCompatibleWritesWith0140 = false;
 
   /**
    * This is used by log compaction only.
@@ -140,6 +142,7 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
     this.useWriterSchema = true;
     this.isLogCompaction = true;
     this.header.putAll(header);
+    this.maintainBackwardsCompatibleWritesWith0140 = config.doMaintainBackwardsCompatibleWritesWith0140();
   }
 
   public HoodieAppendHandle(HoodieWriteConfig config, String instantTime, HoodieTable<T, I, K, O> hoodieTable,
@@ -150,6 +153,7 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
     this.sizeEstimator = new DefaultSizeEstimator();
     this.statuses = new ArrayList<>();
     this.recordProperties.putAll(config.getProps());
+    this.maintainBackwardsCompatibleWritesWith0140 = config.doMaintainBackwardsCompatibleWritesWith0140();
   }
 
   public HoodieAppendHandle(HoodieWriteConfig config, String instantTime, HoodieTable<T, I, K, O> hoodieTable,
@@ -201,13 +205,6 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
             new Path(config.getBasePath()), FSUtils.getPartitionPath(config.getBasePath(), partitionPath),
             hoodieTable.getPartitionMetafileFormat());
         partitionMetadata.trySave(getPartitionId());
-
-        // Since the actual log file written to can be different based on when rollover happens, we use the
-        // base file to denote some log appends happened on a slice. writeToken will still fence concurrent
-        // writers.
-        // https://issues.apache.org/jira/browse/HUDI-1517
-        createMarkerFile(partitionPath, FSUtils.makeBaseFileName(baseInstantTime, writeToken, fileId, hoodieTable.getBaseFileExtension()));
-
         this.writer = createLogWriter(fileSlice, baseInstantTime);
       } catch (Exception e) {
         LOG.error("Error in update task at commit " + instantTime, e);
@@ -452,6 +449,7 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
     try {
       header.put(HoodieLogBlock.HeaderMetadataType.INSTANT_TIME, instantTime);
       header.put(HoodieLogBlock.HeaderMetadataType.SCHEMA, writeSchemaWithMetaFields.toString());
+      int logBlockVersionToWrite = maintainBackwardsCompatibleWritesWith0140 ? 2 : 3;
       List<HoodieLogBlock> blocks = new ArrayList<>(2);
       if (recordList.size() > 0) {
         String keyField = config.populateMetaFields()
@@ -462,7 +460,7 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
       }
 
       if (appendDeleteBlocks && recordsToDelete.size() > 0) {
-        blocks.add(new HoodieDeleteBlock(recordsToDelete.toArray(new DeleteRecord[0]), header));
+        blocks.add(new HoodieDeleteBlock(recordsToDelete.toArray(new DeleteRecord[0]), header, logBlockVersionToWrite));
       }
 
       if (blocks.size() > 0) {
@@ -559,6 +557,10 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
     return true;
   }
 
+  protected boolean addBlockIdentifier() {
+    return true;
+  }
+
   private void writeToBuffer(HoodieRecord<T> record) {
     if (!partitionPath.equals(record.getPartitionPath())) {
       HoodieUpsertException failureEx = new HoodieUpsertException("mismatched partition path, record partition: "
@@ -637,12 +639,13 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
                                          List<HoodieRecord> records,
                                          Map<HeaderMetadataType, String> header,
                                          String keyField) {
+    int logBlockVersionToWrite = writeConfig.doMaintainBackwardsCompatibleWritesWith0140() ? 2 : 3;
     switch (logDataBlockFormat) {
       case AVRO_DATA_BLOCK:
-        return new HoodieAvroDataBlock(records, header, keyField);
+        return new HoodieAvroDataBlock(records, header, keyField, logBlockVersionToWrite);
       case HFILE_DATA_BLOCK:
         return new HoodieHFileDataBlock(
-            records, header, writeConfig.getHFileCompressionAlgorithm(), new Path(writeConfig.getBasePath()));
+            records, header, writeConfig.getHFileCompressionAlgorithm(), new Path(writeConfig.getBasePath()), logBlockVersionToWrite);
       case PARQUET_DATA_BLOCK:
         return new HoodieParquetDataBlock(
             records,
@@ -650,7 +653,8 @@ public class HoodieAppendHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O
             keyField,
             writeConfig.getParquetCompressionCodec(),
             writeConfig.getParquetCompressionRatio(),
-            writeConfig.parquetDictionaryEnabled());
+            writeConfig.parquetDictionaryEnabled(),
+            logBlockVersionToWrite);
       default:
         throw new HoodieException("Data block format " + logDataBlockFormat + " not implemented");
     }

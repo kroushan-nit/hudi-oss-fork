@@ -34,6 +34,7 @@ import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.table.HoodieTableConfig;
+import org.apache.hudi.common.table.log.HoodieFileSliceReader;
 import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.CustomizedThreadFactory;
@@ -68,6 +69,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.HoodieDataTypeUtils;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.sources.BaseRelation;
@@ -90,7 +92,6 @@ import java.util.stream.Stream;
 
 import static org.apache.hudi.client.utils.SparkPartitionUtils.getPartitionFieldVals;
 import static org.apache.hudi.common.config.HoodieCommonConfig.TIMESTAMP_AS_OF;
-import static org.apache.hudi.common.table.log.HoodieFileSliceReader.getFileSliceReader;
 import static org.apache.hudi.config.HoodieClusteringConfig.PLAN_STRATEGY_SORT_COLUMNS;
 
 /**
@@ -107,16 +108,21 @@ public abstract class MultipleSparkJobExecutionStrategy<T>
   @Override
   public HoodieWriteMetadata<HoodieData<WriteStatus>> performClustering(final HoodieClusteringPlan clusteringPlan, final Schema schema, final String instantTime) {
     JavaSparkContext engineContext = HoodieSparkEngineContext.getSparkContext(getEngineContext());
-    boolean shouldPreserveMetadata = Option.ofNullable(clusteringPlan.getPreserveHoodieMetadata()).orElse(false);
+    boolean shouldPreserveMetadata = Option.ofNullable(clusteringPlan.getPreserveHoodieMetadata()).orElse(true);
     ExecutorService clusteringExecutorService = Executors.newFixedThreadPool(
         Math.min(clusteringPlan.getInputGroups().size(), writeConfig.getClusteringMaxParallelism()),
         new CustomizedThreadFactory("clustering-job-group", true));
     try {
+      boolean canUseRowWriter = getWriteConfig().getBooleanOrDefault("hoodie.datasource.write.row.writer.enable", true)
+          && HoodieDataTypeUtils.canUseRowWriter(schema, engineContext.hadoopConfiguration());
+      if (canUseRowWriter) {
+        HoodieDataTypeUtils.tryOverrideParquetWriteLegacyFormatProperty(writeConfig.getProps(), schema);
+      }
       // execute clustering for each group async and collect WriteStatus
       Stream<HoodieData<WriteStatus>> writeStatusesStream = FutureUtils.allOf(
               clusteringPlan.getInputGroups().stream()
                   .map(inputGroup -> {
-                    if (getWriteConfig().getBooleanOrDefault("hoodie.datasource.write.row.writer.enable", false)) {
+                    if (canUseRowWriter) {
                       return runClusteringForGroupAsyncAsRow(inputGroup,
                           clusteringPlan.getStrategy().getStrategyParams(),
                           shouldPreserveMetadata,
@@ -219,7 +225,7 @@ public abstract class MultipleSparkJobExecutionStrategy<T>
         default:
           throw new UnsupportedOperationException(String.format("Layout optimization strategy '%s' is not supported", layoutOptStrategy));
       }
-    }).orElse(isRowPartitioner
+    }).orElseGet(() -> isRowPartitioner
         ? BulkInsertInternalPartitionerWithRowsFactory.get(getWriteConfig(), getHoodieTable().isPartitioned(), true)
         : BulkInsertInternalPartitionerFactory.get(getHoodieTable(), getWriteConfig(), true));
   }
@@ -323,7 +329,7 @@ public abstract class MultipleSparkJobExecutionStrategy<T>
           Option<HoodieFileReader> baseFileReader = StringUtils.isNullOrEmpty(clusteringOp.getDataFilePath())
               ? Option.empty()
               : Option.of(getBaseOrBootstrapFileReader(hadoopConf, bootstrapBasePath, partitionFields, clusteringOp));
-          recordIterators.add(getFileSliceReader(baseFileReader, scanner, readerSchema,
+          recordIterators.add(new HoodieFileSliceReader(baseFileReader, scanner, readerSchema, tableConfig.getPreCombineField(), config.getRecordMerger(),
               tableConfig.getProps(),
               tableConfig.populateMetaFields() ? Option.empty() : Option.of(Pair.of(tableConfig.getRecordKeyFieldProp(),
                   tableConfig.getPartitionFieldProp()))));
@@ -447,9 +453,10 @@ public abstract class MultipleSparkJobExecutionStrategy<T>
     }
 
     String readPathString = String.join(",", Arrays.stream(paths).map(Path::toString).toArray(String[]::new));
+    String globPathString = String.join(",", Arrays.stream(paths).map(Path::getParent).map(Path::toString).distinct().toArray(String[]::new));
     params.put("hoodie.datasource.read.paths", readPathString);
     // Building HoodieFileIndex needs this param to decide query path
-    params.put("glob.paths", readPathString);
+    params.put("glob.paths", globPathString);
 
     // Let Hudi relations to fetch the schema from the table itself
     BaseRelation relation = SparkAdapterSupport$.MODULE$.sparkAdapter()

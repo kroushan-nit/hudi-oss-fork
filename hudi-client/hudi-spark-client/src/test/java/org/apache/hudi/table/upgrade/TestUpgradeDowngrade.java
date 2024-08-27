@@ -22,11 +22,13 @@ import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
+import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieFileGroup;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.model.IOType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
@@ -75,6 +77,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -199,6 +202,7 @@ public class TestUpgradeDowngrade extends HoodieClientTestBase {
     Pair<List<HoodieRecord>, List<HoodieRecord>> inputRecords = twoUpsertCommitDataWithTwoPartitions(firstPartitionCommit2FileSlices, secondPartitionCommit2FileSlices, cfg, client, false);
 
     HoodieTable table = this.getHoodieTable(metaClient, cfg);
+    prepForUpgradeFromZeroToOne(table);
     HoodieInstant commitInstant = table.getPendingCommitTimeline().lastInstant().get();
 
     // delete one of the marker files in 2nd commit if need be.
@@ -553,11 +557,6 @@ public class TestUpgradeDowngrade extends HoodieClientTestBase {
         PARTITION_NAME_BLOOM_FILTERS,
         PARTITION_NAME_RECORD_INDEX
     );
-    Set<String> allPartitionsExceptRecordIndex = CollectionUtils.createImmutableSet(
-        PARTITION_NAME_FILES,
-        PARTITION_NAME_COLUMN_STATS,
-        PARTITION_NAME_BLOOM_FILTERS
-    );
     assertTrue(Files.exists(recordIndexPartitionPath), "record index partition should exist.");
     assertEquals(allPartitions, metaClient.getTableConfig().getMetadataPartitions(),
         TABLE_METADATA_PARTITIONS.key() + " should contain all partitions.");
@@ -571,9 +570,9 @@ public class TestUpgradeDowngrade extends HoodieClientTestBase {
     metaClient = HoodieTableMetaClient.reload(metaClient);
     // validate the relevant table states after downgrade
     assertFalse(Files.exists(recordIndexPartitionPath), "record index partition should be deleted.");
-    assertEquals(allPartitionsExceptRecordIndex, metaClient.getTableConfig().getMetadataPartitions(),
+    assertEquals(Collections.emptySet(), metaClient.getTableConfig().getMetadataPartitions(),
         TABLE_METADATA_PARTITIONS.key() + " should contain all partitions except record_index.");
-    assertEquals(allPartitionsExceptRecordIndex, metaClient.getTableConfig().getMetadataPartitionsInflight(),
+    assertEquals(Collections.emptySet(), metaClient.getTableConfig().getMetadataPartitionsInflight(),
         TABLE_METADATA_PARTITIONS_INFLIGHT.key() + " should contain all partitions except record_index.");
 
   }
@@ -846,6 +845,47 @@ public class TestUpgradeDowngrade extends HoodieClientTestBase {
       assertEquals(1, secondPartitionCommit2FileSlices.size());
     }
     return Pair.of(records, records2);
+  }
+
+  /**
+   * Since how markers are generated for log file changed in Version Six, we regenerate markers in the way version zero do.
+   *
+   * @param table instance of {@link HoodieTable}
+   */
+  private void prepForUpgradeFromZeroToOne(HoodieTable table) throws IOException {
+    List<HoodieInstant> instantsToBeParsed  =
+        metaClient.getActiveTimeline()
+        .getCommitsTimeline()
+        .getInstantsAsStream()
+        .collect(Collectors.toList());
+    for (HoodieInstant instant : instantsToBeParsed) {
+      WriteMarkers writeMarkers =
+          WriteMarkersFactory.get(table.getConfig().getMarkersType(), table, instant.getTimestamp());
+      Set<String> oldMarkers = writeMarkers.allMarkerFilePaths();
+      boolean hasAppendMarker = oldMarkers.stream().anyMatch(marker -> marker.contains(IOType.APPEND.name()));
+      if (hasAppendMarker) {
+        // delete all markers and regenerate
+        writeMarkers.deleteMarkerDir(table.getContext(), 2);
+        for (String oldMarker : oldMarkers) {
+          String typeStr = oldMarker.substring(oldMarker.lastIndexOf(".") + 1);
+          IOType type = IOType.valueOf(typeStr);
+          String partitionFilePath = WriteMarkers.stripMarkerSuffix(oldMarker);
+          Path fullFilePath = new Path(basePath, partitionFilePath);
+          String partitionPath = FSUtils.getRelativePartitionPath(new Path(basePath), fullFilePath.getParent());
+          if (FSUtils.isBaseFile(fullFilePath)) {
+            writeMarkers.create(partitionPath, fullFilePath.getName(), type);
+          } else {
+            String fileId = FSUtils.getFileIdFromFilePath(fullFilePath);
+            String baseInstant = FSUtils.getBaseCommitTimeFromLogPath(fullFilePath);
+            String writeToken = FSUtils.getWriteTokenFromLogPath(fullFilePath);
+            writeMarkers.create(partitionPath,
+                FSUtils.makeBaseFileName(baseInstant, writeToken, fileId, table.getBaseFileFormat().getFileExtension()), type);
+          }
+        }
+        writeMarkers.allMarkerFilePaths()
+            .forEach(markerPath -> assertFalse(markerPath.contains(HoodieLogFile.DELTA_EXTENSION)));
+      }
+    }
   }
 
   private void prepForDowngradeFromVersion(HoodieTableVersion fromVersion) throws IOException {

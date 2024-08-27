@@ -24,21 +24,19 @@ import org.apache.hudi.DataSourceWriteOptions.{INSERT_DROP_DUPS, PAYLOAD_CLASS_N
 import org.apache.hudi.avro.HoodieAvroUtils
 import org.apache.hudi.common.config.TypedProperties
 import org.apache.hudi.common.fs.FSUtils
-import org.apache.hudi.common.model.{HoodieKey, HoodieRecord, HoodieRecordLocation, HoodieSparkRecord, WriteOperationType}
-import org.apache.hudi.common.model.HoodieRecord.HOODIE_META_COLUMNS_NAME_TO_POS
+import org.apache.hudi.common.model._
 import org.apache.hudi.common.util.StringUtils
 import org.apache.hudi.config.HoodieWriteConfig
-import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions
 import org.apache.hudi.keygen.factory.HoodieSparkKeyGeneratorFactory
-import org.apache.hudi.keygen.{BaseKeyGenerator, KeyGenUtils, KeyGenerator, SparkKeyGeneratorInterface}
+import org.apache.hudi.keygen.{BaseKeyGenerator, KeyGenUtils, SparkKeyGeneratorInterface}
 import org.apache.spark.TaskContext
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.HoodieInternalRowUtils.getCachedUnsafeRowWriter
-import org.apache.spark.sql.{DataFrame, HoodieInternalRowUtils}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{DataFrame, HoodieInternalRowUtils}
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConversions.mapAsJavaMap
@@ -77,6 +75,7 @@ object HoodieCreateRecordUtils {
     val shouldDropPartitionColumns = config.getBoolean(DataSourceWriteOptions.DROP_PARTITION_COLUMNS)
     val recordType = config.getRecordMerger.getRecordType
     val autoGenerateRecordKeys: Boolean = !parameters.containsKey(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key())
+    val isPrecombinePresent = !StringUtils.isNullOrEmpty(config.getString(PRECOMBINE_FIELD))
 
     var shouldCombine = false
     if (preppedWriteOperation && !preppedSparkSqlWrites && !preppedSparkSqlMergeInto) {// prepped pk less via spark-ds
@@ -98,7 +97,7 @@ object HoodieCreateRecordUtils {
       }
     }
     // we can skip key generator for prepped flow
-    val usePreppedInsteadOfKeyGen = preppedSparkSqlWrites && preppedWriteOperation
+    val usePreppedInsteadOfKeyGen = preppedSparkSqlWrites || preppedWriteOperation
 
     // NOTE: Avro's [[Schema]] can't be effectively serialized by JVM native serialization framework
     //       (due to containing cyclic refs), therefore we have to convert it to string before
@@ -142,7 +141,7 @@ object HoodieCreateRecordUtils {
               avroRecWithoutMeta
             }
 
-            val hoodieRecord = if (shouldCombine) {
+            val hoodieRecord = if (shouldCombine && isPrecombinePresent) {
               val orderingVal = HoodieAvroUtils.getNestedFieldVal(avroRec, config.getString(PRECOMBINE_FIELD),
                 false, consistentLogicalTimestampEnabled).asInstanceOf[Comparable[_]]
               DataSourceUtils.createHoodieRecord(processedRecord, orderingVal, hoodieKey,

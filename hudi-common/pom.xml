@@ -20,7 +20,7 @@
   <parent>
     <artifactId>hudi</artifactId>
     <groupId>org.apache.hudi</groupId>
-    <version>0.14.0-SNAPSHOT</version>
+    <version>0.14.1-rc2</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -126,6 +126,16 @@
     <dependency>
       <groupId>com.fasterxml.jackson.datatype</groupId>
       <artifactId>jackson-datatype-jsr310</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.module</groupId>
+      <artifactId>jackson-module-afterburner</artifactId>
+    </dependency>
+
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.module</groupId>
+      <artifactId>jackson-module-afterburner</artifactId>
     </dependency>
 
     <!-- Avro -->
@@ -286,5 +296,42 @@
       <artifactId>disruptor</artifactId>
       <version>${disruptor.version}</version>
     </dependency>
+
+    <!-- Dropwizard Metrics -->
+    <dependency>
+          <groupId>io.dropwizard.metrics</groupId>
+          <artifactId>metrics-graphite</artifactId>
+          <exclusions>
+              <exclusion>
+                  <groupId>com.rabbitmq</groupId>
+                  <artifactId>*</artifactId>
+              </exclusion>
+          </exclusions>
+      </dependency>
+      <dependency>
+          <groupId>io.dropwizard.metrics</groupId>
+          <artifactId>metrics-core</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.dropwizard.metrics</groupId>
+          <artifactId>metrics-jmx</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.prometheus</groupId>
+          <artifactId>simpleclient</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.prometheus</groupId>
+          <artifactId>simpleclient_httpserver</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.prometheus</groupId>
+          <artifactId>simpleclient_dropwizard</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.prometheus</groupId>
+          <artifactId>simpleclient_pushgateway</artifactId>
+      </dependency>
+
   </dependencies>
 </project>

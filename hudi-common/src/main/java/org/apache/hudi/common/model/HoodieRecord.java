@@ -18,16 +18,17 @@
 
 package org.apache.hudi.common.model;
 
+import org.apache.hudi.common.util.CollectionUtils;
+import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.keygen.BaseKeyGenerator;
+
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.KryoSerializable;
 import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.hudi.common.util.CollectionUtils;
-import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.collection.Pair;
-import org.apache.hudi.keygen.BaseKeyGenerator;
 
 import javax.annotation.Nullable;
 
@@ -134,6 +135,11 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
   protected HoodieRecordLocation newLocation;
 
   /**
+   * If set, not update index after written.
+   */
+  protected boolean ignoreIndexUpdate;
+
+  /**
    * Indicates whether the object is sealed.
    */
   private boolean sealed;
@@ -158,6 +164,7 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     this.currentLocation = null;
     this.newLocation = null;
     this.sealed = false;
+    this.ignoreIndexUpdate = false;
     this.operation = operation;
     this.metaData = metaData;
   }
@@ -180,9 +187,11 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     this.currentLocation = record.currentLocation;
     this.newLocation = record.newLocation;
     this.sealed = record.sealed;
+    this.ignoreIndexUpdate = record.ignoreIndexUpdate;
   }
 
-  public HoodieRecord() {}
+  public HoodieRecord() {
+  }
 
   public abstract HoodieRecord<T> newInstance();
 
@@ -248,6 +257,17 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     return this.currentLocation != null;
   }
 
+  /**
+   * Sets the ignore flag.
+   */
+  public void setIgnoreIndexUpdate(boolean ignoreFlag) {
+    this.ignoreIndexUpdate = ignoreFlag;
+  }
+
+  public boolean getIgnoreIndexUpdate() {
+    return this.ignoreIndexUpdate;
+  }
+
   @Override
   public boolean equals(Object o) {
     if (this == o) {
@@ -258,7 +278,8 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     }
     HoodieRecord that = (HoodieRecord) o;
     return Objects.equals(key, that.key) && Objects.equals(data, that.data)
-        && Objects.equals(currentLocation, that.currentLocation) && Objects.equals(newLocation, that.newLocation);
+        && Objects.equals(currentLocation, that.currentLocation) && Objects.equals(newLocation, that.newLocation)
+        && Objects.equals(ignoreIndexUpdate, that.ignoreIndexUpdate);
   }
 
   @Override
@@ -335,6 +356,7 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     // NOTE: Writing out actual record payload is relegated to the actual
     //       implementation
     writeRecordPayload(data, kryo, output);
+    kryo.writeObjectOrNull(output, ignoreIndexUpdate, Boolean.class);
   }
 
   /**
@@ -350,6 +372,7 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     // NOTE: Reading out actual record payload is relegated to the actual
     //       implementation
     this.data = readRecordPayload(kryo, input);
+    this.ignoreIndexUpdate = kryo.readObjectOrNull(input, Boolean.class);
 
     // NOTE: We're always seal object after deserialization
     this.sealed = true;
@@ -421,10 +444,12 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
    * org.apache.spark.sql.hudi.command.payload.ExpressionPayload
    */
   private static class EmptyRecord implements GenericRecord {
-    private EmptyRecord() {}
+    private EmptyRecord() {
+    }
 
     @Override
-    public void put(int i, Object v) {}
+    public void put(int i, Object v) {
+    }
 
     @Override
     public Object get(int i) {
@@ -437,7 +462,8 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     }
 
     @Override
-    public void put(String key, Object v) {}
+    public void put(String key, Object v) {
+    }
 
     @Override
     public Object get(String key) {

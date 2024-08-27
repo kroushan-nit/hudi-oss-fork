@@ -38,10 +38,12 @@ import org.apache.hudi.data.HoodieJavaRDD;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.io.HoodieKeyLookupResult;
+import org.apache.hudi.metadata.HoodieTableMetadataUtil;
 import org.apache.hudi.table.HoodieTable;
 
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.spark.Partitioner;
+import org.apache.spark.TaskContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.function.FlatMapFunction;
@@ -74,7 +76,8 @@ public class SparkHoodieBloomIndexHelper extends BaseHoodieBloomIndexHelper {
   private static final SparkHoodieBloomIndexHelper SINGLETON_INSTANCE =
       new SparkHoodieBloomIndexHelper();
 
-  private SparkHoodieBloomIndexHelper() {}
+  private SparkHoodieBloomIndexHelper() {
+  }
 
   public static SparkHoodieBloomIndexHelper getInstance() {
     return SINGLETON_INSTANCE;
@@ -282,7 +285,7 @@ public class SparkHoodieBloomIndexHelper extends BaseHoodieBloomIndexHelper {
       }
 
       String bloomIndexEncodedKey =
-          getBloomFilterIndexKey(new PartitionIndexID(partitionPath), new FileIndexID(baseFileName));
+          getBloomFilterIndexKey(new PartitionIndexID(HoodieTableMetadataUtil.getBloomFilterIndexPartitionIdentifier(partitionPath)), new FileIndexID(baseFileName));
 
       // NOTE: It's crucial that [[targetPartitions]] be congruent w/ the number of
       //       actual file-groups in the Bloom Index in MT
@@ -300,6 +303,10 @@ public class SparkHoodieBloomIndexHelper extends BaseHoodieBloomIndexHelper {
 
     @Override
     public Iterator<List<HoodieKeyLookupResult>> call(Iterator<Tuple2<HoodieFileGroupId, String>> fileGroupIdRecordKeyPairIterator) {
+      TaskContext taskContext = TaskContext.get();
+      LOG.info("HoodieSparkBloomIndexCheckFunction with stageId : {}, stage attempt no: {}, taskId : {}, task attempt no : {}, task attempt id : {} ",
+          taskContext.stageId(), taskContext.stageAttemptNumber(), taskContext.partitionId(), taskContext.attemptNumber(),
+          taskContext.taskAttemptId());
       return new LazyKeyCheckIterator(fileGroupIdRecordKeyPairIterator);
     }
   }

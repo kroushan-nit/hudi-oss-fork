@@ -20,6 +20,7 @@ package org.apache.hudi.sink.compact;
 
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieCleaningPolicy;
+import org.apache.hudi.common.util.FileIOUtils;
 import org.apache.hudi.config.HoodieMemoryConfig;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.HadoopConfigurations;
@@ -150,7 +151,7 @@ public class FlinkCompactionConfig extends Configuration {
   public String compactionPlanInstant;
 
   @Parameter(names = {"--spillable_map_path"}, description = "Default file path prefix for spillable map.")
-  public String spillableMapPath = HoodieMemoryConfig.getDefaultSpillableMapBasePath();
+  public String spillableMapPath = FileIOUtils.getDefaultSpillableMapBasePath();
 
   @Parameter(names = {"--hoodie-conf"}, description = "Any configuration that can be set in the properties file "
       + "(using the CLI parameter \"--props\") can also be passed through command line using this parameter.")
@@ -161,10 +162,10 @@ public class FlinkCompactionConfig extends Configuration {
   public String propsFilePath = "";
 
   public static TypedProperties getProps(FlinkCompactionConfig cfg) {
-    return cfg.propsFilePath.isEmpty()
-        ? buildProperties(cfg.configs)
-        : readConfig(HadoopConfigurations.getHadoopConf(cfg),
-        new Path(cfg.propsFilePath), cfg.configs).getProps();
+    return cfg.propsFilePath.isEmpty() ? buildProperties(cfg.configs) : readConfig(
+        HadoopConfigurations.getHadoopConf(cfg),
+        new Path(cfg.propsFilePath),
+        cfg.configs).getProps();
   }
 
   /**

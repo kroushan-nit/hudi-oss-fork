@@ -85,6 +85,8 @@ public class FSUtils {
   private static final int MAX_ATTEMPTS_RECOVER_LEASE = 10;
   private static final String HOODIE_ENV_PROPS_PREFIX = "HOODIE_ENV_";
 
+  private static final String LOG_FILE_EXTENSION = ".log";
+
   private static final PathFilter ALLOW_ALL_FILTER = file -> true;
 
   public static Configuration prepareHadoopConf(Configuration conf) {
@@ -233,17 +235,16 @@ public class FSUtils {
     fullPartitionPath = getPathWithoutSchemeAndAuthority(fullPartitionPath);
 
     String fullPartitionPathStr = fullPartitionPath.toString();
+    String basePathString = basePath.toString();
 
-    if (!fullPartitionPathStr.startsWith(basePath.toString())) {
+    if (!fullPartitionPathStr.startsWith(basePathString)) {
       throw new IllegalArgumentException("Partition path \"" + fullPartitionPathStr
           + "\" does not belong to base-path \"" + basePath + "\"");
     }
 
-    int partitionStartIndex = fullPartitionPathStr.indexOf(basePath.getName(),
-        basePath.getParent() == null ? 0 : basePath.getParent().toString().length());
     // Partition-Path could be empty for non-partitioned tables
-    return partitionStartIndex + basePath.getName().length() == fullPartitionPathStr.length() ? ""
-        : fullPartitionPathStr.substring(partitionStartIndex + basePath.getName().length() + 1);
+    return fullPartitionPathStr.length() == basePathString.length() ? ""
+        : fullPartitionPathStr.substring(basePathString.length() + 1);
   }
 
   /**
@@ -311,6 +312,63 @@ public class FSUtils {
     } catch (Exception ex) {
       throw new HoodieException("Error get files in partitions: " + String.join(",", partitionPaths), ex);
     }
+  }
+
+  /**
+   * Get all the files in the given partition path.
+   *
+   * @param fileSystem File System
+   * @param partitionPathIncludeBasePath The full partition path including the base path
+   * @param filesNamesUnderThisPartition The names of the files under this partition for which file status is needed
+   * @param ignoreMissingFiles If true, missing files will be ignored and empty Option will be added to the result list
+   * @return List of file statuses for the files under this partition
+   */
+  public static List<Option<FileStatus>> getFileStatusesUnderPartition(FileSystem fileSystem,
+                                                                       Path partitionPathIncludeBasePath,
+                                                                       Set<String> filesNamesUnderThisPartition,
+                                                                       boolean ignoreMissingFiles) {
+    String fileSystemType = fileSystem.getScheme();
+    boolean useListStatus = StorageSchemes.isListStatusFriendly(fileSystemType);
+    List<Option<FileStatus>> result = new ArrayList<>(filesNamesUnderThisPartition.size());
+    try {
+      if (useListStatus) {
+        FileStatus[] fileStatuses = fileSystem.listStatus(partitionPathIncludeBasePath,
+            path -> filesNamesUnderThisPartition.contains(path.getName()));
+        Map<String, FileStatus> filenameToFileStatusMap = Arrays.stream(fileStatuses)
+            .collect(Collectors.toMap(
+                fileStatus -> fileStatus.getPath().getName(),
+                fileStatus -> fileStatus
+            ));
+
+        for (String fileName : filesNamesUnderThisPartition) {
+          if (filenameToFileStatusMap.containsKey(fileName)) {
+            result.add(Option.of(filenameToFileStatusMap.get(fileName)));
+          } else {
+            if (!ignoreMissingFiles) {
+              throw new FileNotFoundException("File not found: " + new Path(partitionPathIncludeBasePath.toString(), fileName));
+            }
+            result.add(Option.empty());
+          }
+        }
+      } else {
+        for (String fileName : filesNamesUnderThisPartition) {
+          Path fullPath = new Path(partitionPathIncludeBasePath.toString(), fileName);
+          try {
+            FileStatus fileStatus = fileSystem.getFileStatus(fullPath);
+            result.add(Option.of(fileStatus));
+          } catch (FileNotFoundException fileNotFoundException) {
+            if (ignoreMissingFiles) {
+              result.add(Option.empty());
+            } else {
+              throw new FileNotFoundException("File not found: " + fullPath.toString());
+            }
+          }
+        }
+      }
+    } catch (IOException e) {
+      throw new HoodieIOException("List files under " + partitionPathIncludeBasePath + " failed", e);
+    }
+    return result;
   }
 
   public static String getFileExtension(String fullName) {
@@ -472,8 +530,11 @@ public class FSUtils {
   }
 
   public static boolean isLogFile(String fileName) {
-    Matcher matcher = LOG_FILE_PATTERN.matcher(fileName);
-    return fileName.contains(".log") && matcher.find();
+    if (fileName.contains(LOG_FILE_EXTENSION)) {
+      Matcher matcher = LOG_FILE_PATTERN.matcher(fileName);
+      return matcher.find();
+    }
+    return false;
   }
 
   /**
@@ -520,6 +581,7 @@ public class FSUtils {
   public static Stream<HoodieLogFile> getAllLogFiles(FileSystem fs, Path partitionPath, final String fileId,
       final String logFileExtension, final String baseCommitTime) throws IOException {
     try {
+      // TODO: Use a better filter to avoid listing all files i.e. use baseCommitTime in the filter too.
       PathFilter pathFilter = path -> path.getName().startsWith("." + fileId) && path.getName().contains(logFileExtension);
       return Arrays.stream(fs.listStatus(partitionPath, pathFilter))
           .map(HoodieLogFile::new)
@@ -712,7 +774,7 @@ public class FSUtils {
             pairOfSubPathAndConf -> deleteSubPath(
                 pairOfSubPathAndConf.getKey(), pairOfSubPathAndConf.getValue(), true)
         );
-        boolean result = fs.delete(dirPath, false);
+        boolean result = fs.delete(dirPath, true);
         LOG.info("Removed directory at " + dirPath);
         return result;
       }
@@ -835,6 +897,31 @@ public class FSUtils {
       }
     }
     return result;
+  }
+
+  public static List<FileStatus> getAllDataFileStatus(FileSystem fs, Path path) throws IOException {
+    List<FileStatus> statuses = new ArrayList<>();
+    for (FileStatus status : fs.listStatus(path)) {
+      if (!status.getPath().toString().contains(HoodieTableMetaClient.METAFOLDER_NAME)) {
+        if (status.isDirectory()) {
+          statuses.addAll(getAllDataFileStatus(fs, status.getPath()));
+        } else {
+          statuses.add(status);
+        }
+      }
+    }
+    return statuses;
+  }
+
+  public static boolean comparePathsWithoutScheme(String pathStr1, String pathStr2) {
+    Path pathWithoutScheme1 = getPathWithoutScheme(new Path(pathStr1));
+    Path pathWithoutScheme2 = getPathWithoutScheme(new Path(pathStr2));
+    return pathWithoutScheme1.equals(pathWithoutScheme2);
+  }
+
+  public static Path getPathWithoutScheme(Path path) {
+    return path.isUriPathAbsolute()
+        ? new Path(null, path.toUri().getAuthority(), path.toUri().getPath()) : path;
   }
 
   /**

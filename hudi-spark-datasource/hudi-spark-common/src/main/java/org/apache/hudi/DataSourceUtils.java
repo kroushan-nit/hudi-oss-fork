@@ -22,7 +22,6 @@ import org.apache.hudi.client.HoodieWriteResult;
 import org.apache.hudi.client.SparkRDDReadClient;
 import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
-import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.model.EmptyHoodieRecordPayload;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.model.HoodieKey;
@@ -48,9 +47,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.HoodieDataTypeUtils;
 import org.apache.spark.sql.Row;
-import org.apache.spark.sql.types.StructType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -95,7 +92,7 @@ public class DataSourceUtils {
    *
    * @see HoodieWriteConfig#getUserDefinedBulkInsertPartitionerClass()
    */
-  private static Option<BulkInsertPartitioner> createUserDefinedBulkInsertPartitioner(HoodieWriteConfig config)
+  public static Option<BulkInsertPartitioner> createUserDefinedBulkInsertPartitioner(HoodieWriteConfig config)
       throws HoodieException {
     String bulkInsertPartitionerClass = config.getUserDefinedBulkInsertPartitionerClass();
     try {
@@ -173,8 +170,16 @@ public class DataSourceUtils {
   public static HoodieWriteConfig createHoodieConfig(String schemaStr, String basePath,
                                                      String tblName, Map<String, String> parameters) {
     boolean asyncCompact = Boolean.parseBoolean(parameters.get(DataSourceWriteOptions.ASYNC_COMPACT_ENABLE().key()));
-    boolean inlineCompact = !asyncCompact && parameters.get(DataSourceWriteOptions.TABLE_TYPE().key())
-        .equals(DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL());
+    boolean inlineCompact = false;
+    if (parameters.containsKey(HoodieCompactionConfig.INLINE_COMPACT.key())) {
+      // if inline is set, fetch the value from it.
+      inlineCompact = Boolean.parseBoolean(parameters.get(HoodieCompactionConfig.INLINE_COMPACT.key()));
+    }
+    // if inline is false, derive the value from asyncCompact and table type
+    if (!inlineCompact) {
+      inlineCompact = !asyncCompact && parameters.get(DataSourceWriteOptions.TABLE_TYPE().key())
+          .equals(DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL());
+    }
     // insert/bulk-insert combining to be true, if filtering for duplicates
     boolean combineInserts = Boolean.parseBoolean(parameters.get(DataSourceWriteOptions.INSERT_DROP_DUPS().key()));
     HoodieWriteConfig.Builder builder = HoodieWriteConfig.newBuilder()
@@ -293,40 +298,5 @@ public class DataSourceUtils {
     HoodieWriteConfig writeConfig =
         HoodieWriteConfig.newBuilder().withPath(parameters.get("path")).withProps(parameters).build();
     return dropDuplicates(jssc, incomingHoodieRecords, writeConfig);
-  }
-
-  /**
-   * Checks whether default value (false) of "hoodie.parquet.writelegacyformat.enabled" should be
-   * overridden in case:
-   *
-   * <ul>
-   *   <li>Property has not been explicitly set by the writer</li>
-   *   <li>Data schema contains {@code DecimalType} that would be affected by it</li>
-   * </ul>
-   *
-   * If both of the aforementioned conditions are true, will override the default value of the config
-   * (by essentially setting the value) to make sure that the produced Parquet data files could be
-   * read by {@code AvroParquetReader}
-   *
-   * @param properties properties specified by the writer
-   * @param schema schema of the dataset being written
-   */
-  public static void tryOverrideParquetWriteLegacyFormatProperty(Map<String, String> properties, StructType schema) {
-    if (HoodieDataTypeUtils.hasSmallPrecisionDecimalType(schema)
-        && properties.get(HoodieStorageConfig.PARQUET_WRITE_LEGACY_FORMAT_ENABLED.key()) == null) {
-      // ParquetWriteSupport writes DecimalType to parquet as INT32/INT64 when the scale of decimalType
-      // is less than {@code Decimal.MAX_LONG_DIGITS}, but {@code AvroParquetReader} which is used by
-      // {@code HoodieParquetReader} does not support DecimalType encoded as INT32/INT64 as.
-      //
-      // To work this problem around we're checking whether
-      //    - Schema contains any decimals that could be encoded as INT32/INT64
-      //    - {@code HoodieStorageConfig.PARQUET_WRITE_LEGACY_FORMAT_ENABLED} has not been explicitly
-      //    set by the writer
-      //
-      // If both of these conditions are true, then we override the default value of {@code
-      // HoodieStorageConfig.PARQUET_WRITE_LEGACY_FORMAT_ENABLED} and set it to "true"
-      LOG.warn("Small Decimal Type found in the persisted schema, reverting default value of 'hoodie.parquet.writelegacyformat.enabled' to true");
-      properties.put(HoodieStorageConfig.PARQUET_WRITE_LEGACY_FORMAT_ENABLED.key(), "true");
-    }
   }
 }

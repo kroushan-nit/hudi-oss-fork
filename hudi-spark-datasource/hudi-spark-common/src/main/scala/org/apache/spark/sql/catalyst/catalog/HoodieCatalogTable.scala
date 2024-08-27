@@ -23,6 +23,7 @@ import org.apache.hudi.avro.AvroSchemaUtils
 import org.apache.hudi.common.config.{DFSPropertiesConfiguration, TypedProperties}
 import org.apache.hudi.common.model.HoodieTableType
 import org.apache.hudi.common.table.HoodieTableConfig.URL_ENCODE_PARTITIONING
+import org.apache.hudi.common.table.timeline.TimelineUtils
 import org.apache.hudi.common.table.{HoodieTableConfig, HoodieTableMetaClient}
 import org.apache.hudi.common.util.StringUtils
 import org.apache.hudi.common.util.ValidationUtils.checkArgument
@@ -169,9 +170,14 @@ class HoodieCatalogTable(val spark: SparkSession, var table: CatalogTable) exten
   lazy val partitionSchema: StructType = StructType(tableSchema.filter(f => partitionFields.contains(f.name)))
 
   /**
-   * All the partition paths
+   * All the partition paths, excludes lazily deleted partitions.
    */
-  def getPartitionPaths: Seq[String] = getAllPartitionPaths(spark, table)
+  def getPartitionPaths: Seq[String] = {
+    val droppedPartitions = TimelineUtils.getDroppedPartitions(metaClient.getActiveTimeline)
+
+    getAllPartitionPaths(spark, table)
+      .filter(!droppedPartitions.contains(_))
+  }
 
   /**
    * Check if table is a partitioned table
@@ -234,10 +240,10 @@ class HoodieCatalogTable(val spark: SparkSession, var table: CatalogTable) exten
   private def parseSchemaAndConfigs(): (StructType, Map[String, String]) = {
     val globalProps = DFSPropertiesConfiguration.getGlobalProps.asScala.toMap
     val globalTableConfigs = mappingSparkDatasourceConfigsToTableConfigs(globalProps)
-    val globalSqlOptions = mapTableConfigsToSqlOptions(globalTableConfigs)
+    val globalSqlOptions = mapHoodieConfigsToSqlOptions(globalTableConfigs)
 
     val sqlOptions = withDefaultSqlOptions(globalSqlOptions ++
-      mapDataSourceWriteOptionsToSqlOptions(catalogProperties) ++ catalogProperties)
+      mapHoodieConfigsToSqlOptions(catalogProperties))
 
     // get final schema and parameters
     val (finalSchema, tableConfigs) = (table.tableType, hoodieTableExists) match {
@@ -265,7 +271,7 @@ class HoodieCatalogTable(val spark: SparkSession, var table: CatalogTable) exten
           s". The associated location('$tableLocation') already exists.")
     }
     HoodieOptionConfig.validateTable(spark, finalSchema,
-      mapTableConfigsToSqlOptions(tableConfigs))
+      mapHoodieConfigsToSqlOptions(tableConfigs))
 
     val resolver = spark.sessionState.conf.resolver
     val dataSchema = finalSchema.filterNot { f =>
@@ -315,7 +321,7 @@ class HoodieCatalogTable(val spark: SparkSession, var table: CatalogTable) exten
 
   private def loadTableSchemaByMetaClient(): Option[StructType] = {
     val resolver = spark.sessionState.conf.resolver
-    getTableSqlSchema(metaClient, includeMetadataFields = true).map(originSchema => {
+    try getTableSqlSchema(metaClient, includeMetadataFields = true).map(originSchema => {
       // Load table schema from meta on filesystem, and fill in 'comment'
       // information from Spark catalog.
       // Hoodie newly added columns are positioned after partition columns,
@@ -329,8 +335,18 @@ class HoodieCatalogTable(val spark: SparkSession, var table: CatalogTable) exten
           nullableField
         }
       }.partition(f => partitionFields.contains(f.name))
-      StructType(dataFields ++ partFields)
+      // insert_overwrite operation with partial partition values will mix up the order
+      // of partition columns, so we also need reorder partition fields here.
+      val nameToField = partFields.map(field => (field.name, field)).toMap
+      val orderedPartFields = partitionFields.map(nameToField(_)).toSeq
+
+      StructType(dataFields ++ orderedPartFields)
     })
+    catch {
+      case cause: Throwable =>
+        logWarning("Failed to load table schema from meta client.", cause)
+        None
+    }
   }
 
   // This code is forked from org.apache.spark.sql.hive.HiveExternalCatalog#verifyDataSchema

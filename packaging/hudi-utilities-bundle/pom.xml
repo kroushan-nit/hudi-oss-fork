@@ -19,7 +19,7 @@
   <parent>
     <artifactId>hudi</artifactId>
     <groupId>org.apache.hudi</groupId>
-    <version>0.14.0-SNAPSHOT</version>
+    <version>0.14.1-rc2</version>
     <relativePath>../../pom.xml</relativePath>
   </parent>
   <modelVersion>4.0.0</modelVersion>
@@ -126,6 +126,8 @@
                   <include>com.twitter:bijection-core_${scala.binary.version}</include>
                   <include>io.confluent:kafka-avro-serializer</include>
                   <include>io.confluent:kafka-schema-serializer</include>
+                  <include>io.confluent:kafka-json-schema-serializer</include>
+                  <include>io.confluent:kafka-protobuf-serializer</include>
                   <include>io.confluent:common-config</include>
                   <include>io.confluent:common-utils</include>
                   <include>io.confluent:kafka-schema-registry-client</include>

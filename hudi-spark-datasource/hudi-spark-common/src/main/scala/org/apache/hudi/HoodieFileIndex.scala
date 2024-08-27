@@ -17,21 +17,23 @@
 
 package org.apache.hudi
 
-import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.hudi.HoodieFileIndex.{DataSkippingFailureMode, collectReferencedColumns, convertFilterForTimestampKeyGenerator, getConfigProperties}
 import org.apache.hudi.HoodieSparkConfUtils.getConfigValue
 import org.apache.hudi.common.config.TimestampKeyGeneratorConfig.{TIMESTAMP_INPUT_DATE_FORMAT, TIMESTAMP_OUTPUT_DATE_FORMAT}
-import org.apache.hudi.common.config.{HoodieMetadataConfig, TypedProperties}
+import org.apache.hudi.common.config.{HoodieMetadataConfig, TimestampKeyGeneratorConfig, TypedProperties}
 import org.apache.hudi.common.model.{FileSlice, HoodieBaseFile, HoodieLogFile}
 import org.apache.hudi.common.table.HoodieTableMetaClient
-import org.apache.hudi.common.util.StringUtils
+import org.apache.hudi.common.util.{DateTimeUtils, StringUtils}
 import org.apache.hudi.exception.HoodieException
+import org.apache.hudi.keygen.parser.HoodieDateTimeParser
 import org.apache.hudi.keygen.{TimestampBasedAvroKeyGenerator, TimestampBasedKeyGenerator}
 import org.apache.hudi.metadata.HoodieMetadataPayload
 import org.apache.hudi.util.JFunction
+
+import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{And, Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.{And, Expression, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, Literal}
 import org.apache.spark.sql.execution.datasources.{FileIndex, FileStatusCache, NoopCache, PartitionDirectory}
 import org.apache.spark.sql.hudi.DataSkippingUtils.translateIntoColumnStatsIndexFilterExpr
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils
@@ -39,10 +41,14 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{Column, SparkSession}
 import org.apache.spark.unsafe.types.UTF8String
+import org.joda.time.format.DateTimeFormat
+import org.joda.time.{DateTime, DateTimeZone}
 
-import java.text.SimpleDateFormat
+import java.sql.Timestamp
+import java.util.TimeZone
 import java.util.stream.Collectors
 import javax.annotation.concurrent.NotThreadSafe
+
 import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
@@ -81,10 +87,12 @@ case class HoodieFileIndex(spark: SparkSession,
     spark = spark,
     metaClient = metaClient,
     schemaSpec = schemaSpec,
-    configProperties = getConfigProperties(spark, options, metaClient),
+    configProperties = getConfigProperties(spark, options),
     queryPaths = HoodieFileIndex.getQueryPaths(options),
     specifiedQueryInstant = options.get(DataSourceReadOptions.TIME_TRAVEL_AS_OF_INSTANT.key).map(HoodieSqlCommonUtils.formatQueryInstant),
-    fileStatusCache = fileStatusCache
+    fileStatusCache = fileStatusCache,
+    beginInstantTime = options.get(DataSourceReadOptions.BEGIN_INSTANTTIME.key),
+    endInstantTime = options.get(DataSourceReadOptions.END_INSTANTTIME.key)
   )
     with FileIndex {
 
@@ -104,7 +112,7 @@ case class HoodieFileIndex(spark: SparkSession,
 
   override def rootPaths: Seq[Path] = getQueryPaths.asScala
 
-  var shouldBroadcast: Boolean = false
+  var shouldEmbedFileSlices: Boolean = false
 
   /**
    * Returns the FileStatus for all the base files (excluding log files). This should be used only for
@@ -148,7 +156,7 @@ case class HoodieFileIndex(spark: SparkSession,
   override def listFiles(partitionFilters: Seq[Expression], dataFilters: Seq[Expression]): Seq[PartitionDirectory] = {
     val prunedPartitionsAndFilteredFileSlices = filterFileSlices(dataFilters, partitionFilters).map {
       case (partitionOpt, fileSlices) =>
-        if (shouldBroadcast) {
+        if (shouldEmbedFileSlices) {
           val baseFileStatusesAndLogFileOnly: Seq[FileStatus] = fileSlices.map(slice => {
             if (slice.getBaseFile.isPresent) {
               slice.getBaseFile.get().getFileStatus
@@ -162,7 +170,7 @@ case class HoodieFileIndex(spark: SparkSession,
             || (f.getBaseFile.isPresent && f.getBaseFile.get().getBootstrapBaseFile.isPresent)).
             foldLeft(Map[String, FileSlice]()) { (m, f) => m + (f.getFileId -> f) }
           if (c.nonEmpty) {
-            PartitionDirectory(new PartitionFileSliceMapping(InternalRow.fromSeq(partitionOpt.get.values), spark.sparkContext.broadcast(c)), baseFileStatusesAndLogFileOnly)
+            PartitionDirectory(new PartitionFileSliceMapping(InternalRow.fromSeq(partitionOpt.get.values), c), baseFileStatusesAndLogFileOnly)
           } else {
             PartitionDirectory(InternalRow.fromSeq(partitionOpt.get.values), baseFileStatusesAndLogFileOnly)
           }
@@ -187,7 +195,7 @@ case class HoodieFileIndex(spark: SparkSession,
 
     if (shouldReadAsPartitionedTable()) {
       prunedPartitionsAndFilteredFileSlices
-    } else if (shouldBroadcast) {
+    } else if (shouldEmbedFileSlices) {
       assert(partitionSchema.isEmpty)
       prunedPartitionsAndFilteredFileSlices
     }else {
@@ -274,7 +282,7 @@ case class HoodieFileIndex(spark: SparkSession,
     // Prune the partition path by the partition filters
     // NOTE: Non-partitioned tables are assumed to consist from a single partition
     //       encompassing the whole table
-    val prunedPartitions = if (shouldBroadcast) {
+    val prunedPartitions = if (shouldEmbedFileSlices) {
       listMatchingPartitionPaths(convertFilterForTimestampKeyGenerator(metaClient, partitionFilters))
     } else {
       listMatchingPartitionPaths(partitionFilters)
@@ -445,7 +453,7 @@ object HoodieFileIndex extends Logging {
     schema.fieldNames.filter { colName => refs.exists(r => resolver.apply(colName, r.name)) }
   }
 
-  def getConfigProperties(spark: SparkSession, options: Map[String, String], metaClient: HoodieTableMetaClient) = {
+  def getConfigProperties(spark: SparkSession, options: Map[String, String]) = {
     val sqlConf: SQLConf = spark.sessionState.conf
     val properties = TypedProperties.fromMap(options.filter(p => p._2 != null).asJava)
 
@@ -463,16 +471,6 @@ object HoodieFileIndex extends Logging {
     if (listingModeOverride != null) {
       properties.setProperty(DataSourceReadOptions.FILE_INDEX_LISTING_MODE_OVERRIDE.key, listingModeOverride)
     }
-    val partitionColumns = metaClient.getTableConfig.getPartitionFields
-    if (partitionColumns.isPresent) {
-      // NOTE: Multiple partition fields could have non-encoded slashes in the partition value.
-      //       We might not be able to properly parse partition-values from the listed partition-paths.
-      //       Fallback to eager listing in this case.
-      if (partitionColumns.get().length > 1
-        && (listingModeOverride == null || DataSourceReadOptions.FILE_INDEX_LISTING_MODE_LAZY.equals(listingModeOverride))) {
-        properties.setProperty(DataSourceReadOptions.FILE_INDEX_LISTING_MODE_OVERRIDE.key, DataSourceReadOptions.FILE_INDEX_LISTING_MODE_EAGER)
-      }
-    }
 
     properties
   }
@@ -487,18 +485,36 @@ object HoodieFileIndex extends Logging {
         keyGenerator.equals(classOf[TimestampBasedAvroKeyGenerator].getCanonicalName))) {
       val inputFormat = tableConfig.getString(TIMESTAMP_INPUT_DATE_FORMAT)
       val outputFormat = tableConfig.getString(TIMESTAMP_OUTPUT_DATE_FORMAT)
-      if (StringUtils.isNullOrEmpty(inputFormat) || StringUtils.isNullOrEmpty(outputFormat) ||
-        inputFormat.equals(outputFormat)) {
+      if (StringUtils.isNullOrEmpty(inputFormat) || StringUtils.isNullOrEmpty(outputFormat) || inputFormat.equals(outputFormat)) {
         partitionFilters
       } else {
         try {
-          val inDateFormat = new SimpleDateFormat(inputFormat)
-          val outDateFormat = new SimpleDateFormat(outputFormat)
+          val propsForTimestampParser = new TypedProperties(tableConfig.getProps)
+          propsForTimestampParser.setProperty(TimestampKeyGeneratorConfig.TIMESTAMP_TYPE_FIELD.key,
+            TimestampBasedAvroKeyGenerator.TimestampType.DATE_STRING.name())
+          val dtParser = new HoodieDateTimeParser(propsForTimestampParser)
+          val inDateFormatter = dtParser.getInputFormatter.get()
+          val outTimeZone = if (dtParser.getOutputDateTimeZone == null) {
+            DateTimeZone.forTimeZone(TimeZone.getTimeZone("GMT"))
+          } else {
+            dtParser.getOutputDateTimeZone
+          }
+          val outDateFormatter = DateTimeFormat.forPattern(dtParser.getOutputDateFormat).withZone(outTimeZone)
+
           partitionFilters.toArray.map {
-            _.transformDown {
+            _.transformUp {
               case Literal(value, dataType) if dataType.isInstanceOf[StringType] =>
-                val converted = outDateFormat.format(inDateFormat.parse(value.toString))
+                val dateObj = inDateFormatter.parseDateTime(value.toString)
+                val converted = dateObj.withZone(outTimeZone).toString(outputFormat)
                 Literal(UTF8String.fromString(converted), StringType)
+              case Literal(value, dataType) if dataType.isInstanceOf[TimestampType] =>
+                val javaTime = Timestamp.from(DateTimeUtils.microsToInstant(value.asInstanceOf[Long]))
+                val dateObj = new DateTime(javaTime.getTime, outTimeZone)
+                val converted = dateObj.toString(outputFormat)
+                val dateObjRounded = outDateFormatter.parseDateTime(converted)
+                Literal(DateTimeUtils.instantToMicros(new Timestamp(dateObjRounded.getMillis).toInstant), TimestampType)
+              case GreaterThan(left, right) => GreaterThanOrEqual(left, right)
+              case LessThan(left, right) => LessThanOrEqual(left, right)
             }
           }
         } catch {

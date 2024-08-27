@@ -36,13 +36,16 @@ import org.apache.hudi.common.table.view.SyncableFileSystemView;
 import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.timeline.service.handlers.BaseFileHandler;
 import org.apache.hudi.timeline.service.handlers.FileSliceHandler;
 import org.apache.hudi.timeline.service.handlers.MarkerHandler;
 import org.apache.hudi.timeline.service.handlers.TimelineHandler;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.module.afterburner.AfterburnerModule;
 import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
 import io.javalin.http.Context;
@@ -67,8 +70,9 @@ import java.util.concurrent.ScheduledExecutorService;
  */
 public class RequestHandler {
 
-  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().registerModule(new AfterburnerModule());
   private static final Logger LOG = LoggerFactory.getLogger(RequestHandler.class);
+  private static final TypeReference<List<String>> LIST_TYPE_REFERENCE = new TypeReference<List<String>>() {};
 
   private final TimelineService.Config timelineServiceConfig;
   private final FileSystemViewManager viewManager;
@@ -325,6 +329,14 @@ public class RequestHandler {
       writeValueAsString(ctx, dtos);
     }, true));
 
+    app.get(RemoteHoodieTableFileSystemView.LATEST_PARTITION_SLICES_STATELESS_URL, new ViewHandler(ctx -> {
+      metricsRegistry.add("LATEST_PARTITION_SLICES_STATELESS", 1);
+      List<FileSliceDTO> dtos = sliceHandler.getLatestFileSlicesStateless(
+          ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.BASEPATH_PARAM, String.class).getOrThrow(e -> new HoodieException("Basepath is invalid")),
+          ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.PARTITION_PARAM, String.class).getOrDefault(""));
+      writeValueAsString(ctx, dtos);
+    }, true));
+
     app.get(RemoteHoodieTableFileSystemView.LATEST_PARTITION_SLICE_URL, new ViewHandler(ctx -> {
       metricsRegistry.add("LATEST_PARTITION_SLICE", 1);
       List<FileSliceDTO> dtos = sliceHandler.getLatestFileSlice(
@@ -409,6 +421,14 @@ public class RequestHandler {
       writeValueAsString(ctx, dtos);
     }, true));
 
+    app.get(RemoteHoodieTableFileSystemView.ALL_FILEGROUPS_FOR_PARTITION_STATELESS_URL, new ViewHandler(ctx -> {
+      metricsRegistry.add("ALL_FILEGROUPS_FOR_PARTITION_STATELESS", 1);
+      List<FileGroupDTO> dtos = sliceHandler.getAllFileGroupsStateless(
+          ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.BASEPATH_PARAM, String.class).getOrThrow(e -> new HoodieException("Basepath is invalid")),
+          ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.PARTITION_PARAM, String.class).getOrDefault(""));
+      writeValueAsString(ctx, dtos);
+    }, true));
+
     app.post(RemoteHoodieTableFileSystemView.REFRESH_TABLE, new ViewHandler(ctx -> {
       metricsRegistry.add("REFRESH_TABLE", 1);
       boolean success = sliceHandler
@@ -421,6 +441,19 @@ public class RequestHandler {
       boolean success = sliceHandler
           .loadAllPartitions(ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.BASEPATH_PARAM, String.class).getOrThrow(e -> new HoodieException("Basepath is invalid")));
       writeValueAsString(ctx, success);
+    }, false));
+
+    app.post(RemoteHoodieTableFileSystemView.LOAD_PARTITIONS_URL, new ViewHandler(ctx -> {
+      metricsRegistry.add("LOAD_PARTITIONS", 1);
+      String basePath = ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.BASEPATH_PARAM, String.class).getOrThrow(e -> new HoodieException("Basepath is invalid"));
+      try {
+        List<String> partitionPaths = OBJECT_MAPPER.readValue(ctx.queryParamAsClass(RemoteHoodieTableFileSystemView.PARTITIONS_PARAM, String.class)
+            .getOrThrow(e -> new HoodieException("Partitions param is invalid")), LIST_TYPE_REFERENCE);
+        boolean success = sliceHandler.loadPartitions(basePath, partitionPaths);
+        writeValueAsString(ctx, success);
+      } catch (IOException e) {
+        throw new HoodieIOException("Failed to parse request parameter", e);
+      }
     }, false));
 
     app.get(RemoteHoodieTableFileSystemView.ALL_REPLACED_FILEGROUPS_BEFORE_OR_ON, new ViewHandler(ctx -> {
@@ -477,6 +510,13 @@ public class RequestHandler {
     app.get(MarkerOperation.CREATE_AND_MERGE_MARKERS_URL, new ViewHandler(ctx -> {
       metricsRegistry.add("CREATE_AND_MERGE_MARKERS", 1);
       Set<String> markers = markerHandler.getCreateAndMergeMarkers(
+          ctx.queryParamAsClass(MarkerOperation.MARKER_DIR_PATH_PARAM, String.class).getOrDefault(""));
+      writeValueAsString(ctx, markers);
+    }, false));
+
+    app.get(MarkerOperation.APPEND_MARKERS_URL, new ViewHandler(ctx -> {
+      metricsRegistry.add("APPEND_MARKERS", 1);
+      Set<String> markers = markerHandler.getAppendMarkers(
           ctx.queryParamAsClass(MarkerOperation.MARKER_DIR_PATH_PARAM, String.class).getOrDefault(""));
       writeValueAsString(ctx, markers);
     }, false));

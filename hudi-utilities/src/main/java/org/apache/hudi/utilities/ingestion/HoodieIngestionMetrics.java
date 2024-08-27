@@ -19,6 +19,7 @@
 package org.apache.hudi.utilities.ingestion;
 
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.config.metrics.HoodieMetricsConfig;
 
 import com.codahale.metrics.Timer;
 
@@ -29,9 +30,13 @@ import java.io.Serializable;
  */
 public abstract class HoodieIngestionMetrics implements Serializable {
 
-  protected final HoodieWriteConfig writeConfig;
+  protected final HoodieMetricsConfig writeConfig;
 
   public HoodieIngestionMetrics(HoodieWriteConfig writeConfig) {
+    this(writeConfig.getMetricsConfig());
+  }
+
+  public HoodieIngestionMetrics(HoodieMetricsConfig writeConfig) {
     this.writeConfig = writeConfig;
   }
 
@@ -40,6 +45,8 @@ public abstract class HoodieIngestionMetrics implements Serializable {
   public abstract Timer.Context getHiveSyncTimerContext();
 
   public abstract Timer.Context getMetaSyncTimerContext();
+  
+  public abstract Timer.Context getErrorTableWriteTimerContext();
 
   public abstract void updateStreamerMetrics(long durationNanos);
 
@@ -47,11 +54,17 @@ public abstract class HoodieIngestionMetrics implements Serializable {
 
   public abstract void updateStreamerSyncMetrics(long syncEpochTimeMs);
 
+  public abstract void updateErrorTableCommitDuration(long durationInNs);
+
   public abstract void updateStreamerHeartbeatTimestamp(long heartbeatTimestampMs);
 
   public abstract void updateStreamerSourceDelayCount(String sourceMetricName, long sourceDelayCount);
 
   public abstract void updateStreamerSourceNewMessageCount(String sourceMetricName, long sourceNewMessageCount);
+
+  public abstract void updateStreamerSourceParallelism(int sourceParallelism);
+
+  public abstract void updateStreamerSourceBytesToBeIngestedInSyncRound(long sourceBytesToBeIngested);
 
   public abstract void shutdown();
 }

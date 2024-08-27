@@ -93,11 +93,12 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
       // TODO(yihua): this validation is removed for Java client used by kafka-connect.  Need to revisit this.
       if (config.getEngineType() == EngineType.SPARK) {
         // if there are inflight writes, their instantTime must not be less than that of compaction instant time
-        table.getActiveTimeline().getCommitsTimeline().filterPendingExcludingMajorAndMinorCompaction().firstInstant()
-            .ifPresent(earliestInflight -> ValidationUtils.checkArgument(
-                HoodieTimeline.compareTimestamps(earliestInflight.getTimestamp(), HoodieTimeline.GREATER_THAN, instantTime),
-                "Earliest write inflight instant time must be later than compaction time. Earliest :" + earliestInflight
-                    + ", Compaction scheduled at " + instantTime));
+        Option<HoodieInstant> earliestInflightOpt = table.getActiveTimeline().getCommitsTimeline().filterPendingExcludingMajorAndMinorCompaction().firstInstant();
+        if (earliestInflightOpt.isPresent() && !HoodieTimeline.compareTimestamps(earliestInflightOpt.get().getTimestamp(), HoodieTimeline.GREATER_THAN, instantTime)) {
+          LOG.warn("Earliest write inflight instant time must be later than compaction time. Earliest :" + earliestInflightOpt.get()
+              + ", Compaction scheduled at " + instantTime + ". Hence skipping to schedule compaction");
+          return Option.empty();
+        }
       }
       // Committed and pending compaction instants should have strictly lower timestamps
       List<HoodieInstant> conflictingInstants = table.getActiveTimeline()
@@ -118,13 +119,13 @@ public class ScheduleCompactionActionExecutor<T, I, K, O> extends BaseActionExec
         if (operationType.equals(WriteOperationType.COMPACT)) {
           HoodieInstant compactionInstant = new HoodieInstant(HoodieInstant.State.REQUESTED,
               HoodieTimeline.COMPACTION_ACTION, instantTime);
-          table.getActiveTimeline().saveToCompactionRequested(compactionInstant,
-              TimelineMetadataUtils.serializeCompactionPlan(plan));
+          table.getActiveTimeline().saveToCompactionRequestedOptionallyAuxFolder(compactionInstant,
+              TimelineMetadataUtils.serializeCompactionPlan(plan), config.doWriteCompactionPlanToAuxFolder());
         } else {
           HoodieInstant logCompactionInstant = new HoodieInstant(HoodieInstant.State.REQUESTED,
               HoodieTimeline.LOG_COMPACTION_ACTION, instantTime);
           table.getActiveTimeline().saveToLogCompactionRequested(logCompactionInstant,
-              TimelineMetadataUtils.serializeCompactionPlan(plan));
+              TimelineMetadataUtils.serializeCompactionPlan(plan), config.doWriteCompactionPlanToAuxFolder());
         }
       } catch (IOException ioe) {
         throw new HoodieIOException("Exception scheduling compaction", ioe);

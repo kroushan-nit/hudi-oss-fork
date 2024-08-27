@@ -43,7 +43,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import static org.apache.hudi.client.utils.MetadataTableUtils.shouldUseBatchLookup;
 import static org.apache.hudi.common.table.timeline.HoodieInstant.State.REQUESTED;
 import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.deserializeCleanerPlan;
 import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.deserializeHoodieCleanMetadata;
@@ -90,7 +89,7 @@ public class SavepointActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
         } catch (IOException e) {
           throw new HoodieSavepointException("Failed to savepoint " + instantTime, e);
         }
-      }).orElse(table.getCompletedCommitsTimeline().firstInstant().get().getTimestamp());
+      }).orElseGet(() -> table.getCompletedCommitsTimeline().firstInstant().get().getTimestamp());
 
       // Cannot allow savepoint time on a commit that could have been cleaned
       ValidationUtils.checkArgument(HoodieTimeline.compareTimestamps(instantTime, HoodieTimeline.GREATER_THAN_OR_EQUALS, lastCommitRetained),
@@ -108,7 +107,7 @@ public class SavepointActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
       // (2) using direct file system listing:  we parallelize the partition listing so that
       // each partition can be listed on the file system concurrently through Spark.
       // Note that
-      if (shouldUseBatchLookup(table.getMetaClient().getTableConfig(), config)) {
+      if (table.getMetaClient().getTableConfig().isMetadataTableAvailable()) {
         latestFilesMap = view.getAllLatestFileSlicesBeforeOrOn(instantTime).entrySet().stream()
             .collect(Collectors.toMap(
                 Map.Entry::getKey,

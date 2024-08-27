@@ -60,6 +60,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -108,8 +109,6 @@ public abstract class AbstractHoodieLogRecordReader {
   private final TypedProperties payloadProps;
   // Log File Paths
   protected final List<String> logFilePaths;
-  // Read Lazily flag
-  private final boolean readBlocksLazily;
   // Reverse reader - Not implemented yet (NA -> Why do we need ?)
   // but present here for plumbing for future implementation
   private final boolean reverseReader;
@@ -174,7 +173,6 @@ public abstract class AbstractHoodieLogRecordReader {
     this.totalLogFiles.addAndGet(logFilePaths.size());
     this.logFilePaths = logFilePaths;
     this.reverseReader = reverseReader;
-    this.readBlocksLazily = readBlocksLazily;
     this.fs = fs;
     this.bufferSize = bufferSize;
     this.instantRange = instantRange;
@@ -224,6 +222,8 @@ public abstract class AbstractHoodieLogRecordReader {
 
   private void scanInternalV1(Option<KeySpec> keySpecOpt) {
     currentInstantLogBlocks = new ArrayDeque<>();
+    AtomicBoolean blockIdentifiersPresent = new AtomicBoolean(false);
+
     progress = 0.0f;
     totalLogFiles = new AtomicLong(0);
     totalRollbacks = new AtomicLong(0);
@@ -238,7 +238,7 @@ public abstract class AbstractHoodieLogRecordReader {
       // Iterate over the paths
       logFormatReaderWrapper = new HoodieLogFormatReader(fs,
           logFilePaths.stream().map(logFile -> new HoodieLogFile(new CachingPath(logFile))).collect(Collectors.toList()),
-          readerSchema, readBlocksLazily, reverseReader, bufferSize, shouldLookupRecords(), recordKeyField, internalSchema);
+          readerSchema, true, reverseReader, bufferSize, shouldLookupRecords(), recordKeyField, internalSchema);
 
       Set<HoodieLogFile> scannedLogFiles = new HashSet<>();
       while (logFormatReaderWrapper.hasNext()) {
@@ -271,23 +271,12 @@ public abstract class AbstractHoodieLogRecordReader {
           case HFILE_DATA_BLOCK:
           case AVRO_DATA_BLOCK:
           case PARQUET_DATA_BLOCK:
-            LOG.info("Reading a data block from file " + logFile.getPath() + " at instant "
-                + logBlock.getLogBlockHeader().get(INSTANT_TIME));
-            if (isNewInstantBlock(logBlock) && !readBlocksLazily) {
-              // If this is an avro data block belonging to a different commit/instant,
-              // then merge the last blocks and records into the main result
-              processQueuedBlocksForInstant(currentInstantLogBlocks, scannedLogFiles.size(), keySpecOpt);
-            }
+            LOG.info("Reading a data block from file " + logFile.getPath() + " at instant " + instantTime);
             // store the current block
             currentInstantLogBlocks.push(logBlock);
             break;
           case DELETE_BLOCK:
             LOG.info("Reading a delete block from file " + logFile.getPath());
-            if (isNewInstantBlock(logBlock) && !readBlocksLazily) {
-              // If this is a delete data block belonging to a different commit/instant,
-              // then merge the last blocks and records into the main result
-              processQueuedBlocksForInstant(currentInstantLogBlocks, scannedLogFiles.size(), keySpecOpt);
-            }
             // store deletes so can be rolled back
             currentInstantLogBlocks.push(logBlock);
             break;
@@ -358,9 +347,11 @@ public abstract class AbstractHoodieLogRecordReader {
       }
       // merge the last read block when all the blocks are done reading
       if (!currentInstantLogBlocks.isEmpty()) {
+        // if there are no dups, we can take currentInstantLogBlocks as is.
         LOG.info("Merging the final data blocks");
         processQueuedBlocksForInstant(currentInstantLogBlocks, scannedLogFiles.size(), keySpecOpt);
       }
+
       // Done
       progress = 1.0f;
     } catch (IOException e) {
@@ -397,7 +388,7 @@ public abstract class AbstractHoodieLogRecordReader {
       // Iterate over the paths
       logFormatReaderWrapper = new HoodieLogFormatReader(fs,
           logFilePaths.stream().map(logFile -> new HoodieLogFile(new CachingPath(logFile))).collect(Collectors.toList()),
-          readerSchema, readBlocksLazily, reverseReader, bufferSize, shouldLookupRecords(), recordKeyField, internalSchema);
+          readerSchema, true, reverseReader, bufferSize, shouldLookupRecords(), recordKeyField, internalSchema);
 
       /**
        * Scanning log blocks and placing the compacted blocks at the right place require two traversals.
@@ -810,7 +801,7 @@ public abstract class AbstractHoodieLogRecordReader {
             .orElse(Function.identity());
 
     Schema schema = schemaEvolutionTransformerOpt.map(Pair::getRight)
-        .orElse(dataBlock.getSchema());
+        .orElseGet(dataBlock::getSchema);
 
     return Pair.of(new CloseableMappingIterator<>(blockRecordsIterator, transformer), schema);
   }

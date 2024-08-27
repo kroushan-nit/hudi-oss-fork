@@ -32,8 +32,6 @@ import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
-import org.apache.hudi.common.table.view.FileSystemViewStorageType;
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestTable;
@@ -80,8 +78,7 @@ public class CompactionTestBase extends HoodieClientTestBase {
             .hfileMaxFileSize(1024 * 1024 * 1024).parquetMaxFileSize(1024 * 1024 * 1024).orcMaxFileSize(1024 * 1024 * 1024).build())
         .forTable("test-trip-table")
         .withIndexConfig(HoodieIndexConfig.newBuilder().withIndexType(HoodieIndex.IndexType.BLOOM).build())
-        .withEmbeddedTimelineServerEnabled(true).withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder()
-            .withStorageType(FileSystemViewStorageType.EMBEDDED_KV_STORE).build());
+        .withEmbeddedTimelineServerEnabled(true);
   }
 
   /**
@@ -263,7 +260,7 @@ public class CompactionTestBase extends HoodieClientTestBase {
   }
 
   protected List<FileSlice> getCurrentLatestFileSlices(HoodieTable table) {
-    HoodieTableFileSystemView view = new HoodieTableFileSystemView(table.getMetaClient(),
+    HoodieTableFileSystemView view = HoodieTableFileSystemView.fileListingBasedFileSystemView(context, table.getMetaClient(),
         table.getMetaClient().getActiveTimeline().reload().getWriteTimeline());
     return Arrays.stream(HoodieTestDataGenerator.DEFAULT_PARTITION_PATHS)
         .flatMap(view::getLatestFileSlices).collect(Collectors.toList());

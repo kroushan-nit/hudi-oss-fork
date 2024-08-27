@@ -19,18 +19,20 @@ package org.apache.hudi
 
 import org.apache.hadoop.fs.Path
 import org.apache.hudi.DataSourceReadOptions._
-import org.apache.hudi.DataSourceWriteOptions.{BOOTSTRAP_OPERATION_OPT_VAL, OPERATION, RECORDKEY_FIELD, SPARK_SQL_WRITES_PREPPED_KEY, STREAMING_CHECKPOINT_IDENTIFIER}
+import org.apache.hudi.DataSourceWriteOptions.{BOOTSTRAP_OPERATION_OPT_VAL, OPERATION, STREAMING_CHECKPOINT_IDENTIFIER}
 import org.apache.hudi.cdc.CDCRelation
+import org.apache.hudi.common.HoodieSchemaNotFoundException
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.HoodieTableType.{COPY_ON_WRITE, MERGE_ON_READ}
-import org.apache.hudi.common.model.{HoodieRecord, WriteConcurrencyMode}
+import org.apache.hudi.common.model.WriteConcurrencyMode
 import org.apache.hudi.common.table.timeline.HoodieInstant
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
 import org.apache.hudi.common.util.ConfigUtils
 import org.apache.hudi.common.util.ValidationUtils.checkState
 import org.apache.hudi.config.HoodieBootstrapConfig.DATA_QUERIES_ONLY
-import org.apache.hudi.config.HoodieWriteConfig.{SPARK_SQL_MERGE_INTO_PREPPED_KEY, WRITE_CONCURRENCY_MODE}
+import org.apache.hudi.config.HoodieWriteConfig.WRITE_CONCURRENCY_MODE
 import org.apache.hudi.exception.HoodieException
+import org.apache.hudi.internal.schema.HoodieSchemaException
 import org.apache.hudi.util.PathUtils
 import org.apache.spark.sql.execution.streaming.{Sink, Source}
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils.isUsingHiveCatalog
@@ -71,7 +73,17 @@ class DefaultSource extends RelationProvider
 
   override def createRelation(sqlContext: SQLContext,
                               parameters: Map[String, String]): BaseRelation = {
-    createRelation(sqlContext, parameters, null)
+    try {
+      val relation = createRelation(sqlContext, parameters, null)
+      if (relation.schema.isEmpty) {
+        new EmptyRelation(sqlContext, new StructType())
+      } else {
+        relation
+      }
+    } catch {
+      case _: HoodieSchemaNotFoundException => new EmptyRelation(sqlContext, new StructType())
+      case e => throw e
+    }
   }
 
   override def createRelation(sqlContext: SQLContext,
@@ -102,8 +114,7 @@ class DefaultSource extends RelationProvider
       )
     } else {
       Map()
-    }) ++ DataSourceOptionsHelper.parametersWithReadDefaults(optParams +
-      (DATA_QUERIES_ONLY.key() -> sqlContext.getConf(DATA_QUERIES_ONLY.key(), optParams.getOrElse(DATA_QUERIES_ONLY.key(), DATA_QUERIES_ONLY.defaultValue()))))
+    }) ++ DataSourceOptionsHelper.parametersWithReadDefaults(sqlContext.getAllConfs.filter(k => k._1.startsWith("hoodie.")) ++ optParams)
 
     // Get the table base path
     val tablePath = if (globPaths.nonEmpty) {
@@ -125,34 +136,36 @@ class DefaultSource extends RelationProvider
   }
 
   /**
-    * This DataSource API is used for writing the DataFrame at the destination. For now, we are returning a dummy
-    * relation here because Spark does not really make use of the relation returned, and just returns an empty
-    * dataset at [[org.apache.spark.sql.execution.datasources.SaveIntoDataSourceCommand.run()]]. This saves us the cost
-    * of creating and returning a parquet relation here.
-    *
-    * TODO: Revisit to return a concrete relation here when we support CREATE TABLE AS for Hudi with DataSource API.
-    *       That is the only case where Spark seems to actually need a relation to be returned here
-    *       [[org.apache.spark.sql.execution.datasources.DataSource.writeAndRead()]]
-    *
-    * @param sqlContext Spark SQL Context
-    * @param mode Mode for saving the DataFrame at the destination
-    * @param optParams Parameters passed as part of the DataFrame write operation
-    * @param rawDf Spark DataFrame to be written
-    * @return Spark Relation
-    */
+   * This DataSource API is used for writing the DataFrame at the destination. For now, we are returning a dummy
+   * relation here because Spark does not really make use of the relation returned, and just returns an empty
+   * dataset at [[org.apache.spark.sql.execution.datasources.SaveIntoDataSourceCommand.run()]]. This saves us the cost
+   * of creating and returning a parquet relation here.
+   *
+   * TODO: Revisit to return a concrete relation here when we support CREATE TABLE AS for Hudi with DataSource API.
+   * That is the only case where Spark seems to actually need a relation to be returned here
+   * [[org.apache.spark.sql.execution.datasources.DataSource.writeAndRead()]]
+   *
+   * @param sqlContext Spark SQL Context
+   * @param mode       Mode for saving the DataFrame at the destination
+   * @param optParams  Parameters passed as part of the DataFrame write operation
+   * @param df         Spark DataFrame to be written
+   * @return Spark Relation
+   */
   override def createRelation(sqlContext: SQLContext,
                               mode: SaveMode,
                               optParams: Map[String, String],
                               df: DataFrame): BaseRelation = {
-    if (optParams.get(OPERATION.key).contains(BOOTSTRAP_OPERATION_OPT_VAL)) {
-      HoodieSparkSqlWriter.bootstrap(sqlContext, mode, optParams, df)
-      HoodieSparkSqlWriter.cleanup()
-    } else {
-      val (success, _, _, _, _, _) = HoodieSparkSqlWriter.write(sqlContext, mode, optParams, df)
-      HoodieSparkSqlWriter.cleanup()
-      if (!success) {
-        throw new HoodieException("Write to Hudi failed")
+    try {
+      if (optParams.get(OPERATION.key).contains(BOOTSTRAP_OPERATION_OPT_VAL)) {
+        HoodieSparkSqlWriter.bootstrap(sqlContext, mode, optParams, df)
+      } else {
+        val (success, _, _, _, _, _) = HoodieSparkSqlWriter.write(sqlContext, mode, optParams, df)
+        if (!success) {
+          throw new HoodieException("Write to Hudi failed")
+        }
       }
+    } finally {
+      HoodieSparkSqlWriter.cleanup()
     }
 
     new HoodieEmptyRelation(sqlContext, df.schema)
@@ -348,7 +361,9 @@ object DefaultSource {
         AvroConversionUtils.convertAvroSchemaToStructType(avroSchema)
       } catch {
         case _: Exception =>
-          require(schema.isDefined, "Fail to resolve source schema")
+          if (schema.isEmpty || schema.get == null) {
+            throw new HoodieSchemaNotFoundException("Failed to resolve source schema")
+          }
           schema.get
       }
     }

@@ -132,7 +132,7 @@ public class HoodieCopyOnWriteTableInputFormat extends HoodieTableInputFormat {
     List<Path> nonHoodiePaths = inputPathHandler.getNonHoodieInputPaths();
     if (nonHoodiePaths.size() > 0) {
       setInputPaths(job, nonHoodiePaths.toArray(new Path[nonHoodiePaths.size()]));
-      FileStatus[] fileStatuses = doListStatus(job);
+      FileStatus[] fileStatuses = listStatusForNonHoodiePaths(job);
       returns.addAll(Arrays.asList(fileStatuses));
     }
 
@@ -156,6 +156,16 @@ public class HoodieCopyOnWriteTableInputFormat extends HoodieTableInputFormat {
    */
   protected final FileStatus[] doListStatus(JobConf job) throws IOException {
     return super.listStatus(job);
+  }
+
+  /**
+   * return non hoodie paths
+   * @param job
+   * @return
+   * @throws IOException
+   */
+  public FileStatus[] listStatusForNonHoodiePaths(JobConf job) throws IOException {
+    return doListStatus(job);
   }
 
   /**

@@ -28,11 +28,15 @@ import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.data.HoodieJavaRDD;
 import org.apache.hudi.metrics.DistributedRegistry;
+import org.apache.hudi.metrics.MetricsReporterType;
+import org.apache.hudi.table.HoodieSparkTable;
+import org.apache.hudi.table.HoodieTable;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.api.java.JavaRDD;
@@ -98,14 +102,14 @@ public class SparkHoodieBackedTableMetadataWriter extends HoodieBackedTableMetad
   protected void initRegistry() {
     if (metadataWriteConfig.isMetricsOn()) {
       Registry registry;
-      if (metadataWriteConfig.isExecutorMetricsEnabled()) {
+      if (metadataWriteConfig.isExecutorMetricsEnabled() && metadataWriteConfig.getMetricsReporterType() != MetricsReporterType.INMEMORY) {
         registry = Registry.getRegistry("HoodieMetadata", DistributedRegistry.class.getName());
         HoodieSparkEngineContext sparkEngineContext = (HoodieSparkEngineContext) engineContext;
         ((DistributedRegistry) registry).register(sparkEngineContext.getJavaSparkContext());
       } else {
         registry = Registry.getRegistry("HoodieMetadata");
       }
-      this.metrics = Option.of(new HoodieMetadataMetrics(registry));
+      this.metrics = Option.of(new HoodieMetadataMetrics(metadataWriteConfig.getMetricsConfig()));
     } else {
       this.metrics = Option.empty();
     }
@@ -138,6 +142,11 @@ public class SparkHoodieBackedTableMetadataWriter extends HoodieBackedTableMetad
     String actionType = CommitUtils.getCommitActionType(WriteOperationType.DELETE_PARTITION, HoodieTableType.MERGE_ON_READ);
     writeClient.startCommitWithTime(instantTime, actionType);
     writeClient.deletePartitions(partitionsToDrop, instantTime);
+  }
+
+  @Override
+  protected HoodieTable getHoodieTable(HoodieWriteConfig writeConfig, HoodieTableMetaClient metaClient) {
+    return HoodieSparkTable.create(writeConfig, engineContext, metaClient);
   }
 
   @Override

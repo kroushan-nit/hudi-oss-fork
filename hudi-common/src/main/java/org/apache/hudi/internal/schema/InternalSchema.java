@@ -37,6 +37,9 @@ import java.util.stream.Collectors;
  * used to support schema evolution.
  */
 public class InternalSchema implements Serializable {
+  public static final String ARRAY_ELEMENT = "element";
+  public static final String MAP_KEY = "key";
+  public static final String MAP_VALUE = "value";
 
   private static final InternalSchema EMPTY_SCHEMA = new InternalSchema(-1L, RecordType.get());
 
@@ -50,6 +53,7 @@ public class InternalSchema implements Serializable {
   private transient Map<Integer, Field> idToField = null;
   private transient Map<String, Integer> nameToId = null;
   private transient Map<Integer, String> idToName = null;
+  private transient Map<String, Integer> nameToPosition = null;
 
   public static InternalSchema getEmptyInternalSchema() {
     return EMPTY_SCHEMA;
@@ -158,12 +162,12 @@ public class InternalSchema implements Serializable {
   }
 
   /**
-   * Returns the {@link Type} of a sub-field identified by the field name.
+   * Returns the fully qualified name of the field corresponding to the given id.
    *
    * @param id a field id
-   * @return fullName of field of
+   * @return full name of field corresponding to id
    */
-  public String findfullName(int id) {
+  public String findFullName(int id) {
     if (idToName == null) {
       buildIdToName();
     }
@@ -268,12 +272,24 @@ public class InternalSchema implements Serializable {
     return buildNameToId().getOrDefault(name, -1);
   }
 
+  /**
+   * Returns the full name of the field and its position in the schema.
+   * This differs from its ID in cases where new fields are not appended to the end of schemas.
+   * The output is used when reconciling the order of fields while ingesting.
+   * @return a mapping from full field name to a position
+   */
+  public Map<String, Integer> getNameToPosition() {
+    if (nameToPosition == null) {
+      nameToPosition = InternalSchemaBuilder.getBuilder().buildNameToPosition(record);
+    }
+    return nameToPosition;
+  }
+
   @Override
   public String toString() {
     return String.format("table {\n%s\n}",
         StringUtils.join(record.fields().stream()
-            .map(f -> " " + f)
-            .collect(Collectors.toList()).toArray(new String[0]), "\n"));
+            .map(f -> " " + f).toArray(String[]::new), "\n"));
   }
 
   @Override

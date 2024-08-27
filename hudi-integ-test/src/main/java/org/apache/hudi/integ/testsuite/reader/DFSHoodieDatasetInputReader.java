@@ -33,6 +33,7 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner;
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
 import org.apache.hudi.common.table.view.TableFileSystemView;
+import org.apache.hudi.common.util.FileIOUtils;
 import org.apache.hudi.common.util.HoodieRecordUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.TypeUtils;
@@ -109,7 +110,7 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
 
   private JavaPairRDD<String, Iterator<FileSlice>> getPartitionToFileSlice(HoodieTableMetaClient metaClient,
       List<String> partitionPaths) {
-    TableFileSystemView.SliceView fileSystemView = new HoodieTableFileSystemView(metaClient,
+    TableFileSystemView.SliceView fileSystemView = HoodieTableFileSystemView.fileListingBasedFileSystemView(new HoodieSparkEngineContext(jsc), metaClient,
         metaClient.getCommitsAndCompactionTimeline().filterCompletedInstants());
     // pass num partitions to another method
     JavaPairRDD<String, Iterator<FileSlice>> partitionToFileSliceList = jsc.parallelize(partitionPaths).mapToPair(p -> {
@@ -288,7 +289,7 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
           .withReadBlocksLazily(true)
           .withReverseReader(false)
           .withBufferSize(HoodieMemoryConfig.MAX_DFS_STREAM_BUFFER_SIZE.defaultValue())
-          .withSpillableMapBasePath(HoodieMemoryConfig.getDefaultSpillableMapBasePath())
+          .withSpillableMapBasePath(FileIOUtils.getDefaultSpillableMapBasePath())
           .withDiskMapType(HoodieCommonConfig.SPILLABLE_DISK_MAP_TYPE.defaultValue())
           .withBitCaskDiskMapCompressionEnabled(HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue())
           .withOptimizedLogBlocksScan(Boolean.parseBoolean(HoodieCompactionConfig.ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN.defaultValue()))

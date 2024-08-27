@@ -18,6 +18,8 @@
 
 package org.apache.hudi.common.testutils;
 
+import org.apache.hudi.common.engine.HoodieEngineContext;
+import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
@@ -25,6 +27,7 @@ import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
 import org.apache.hudi.common.table.view.SyncableFileSystemView;
 import org.apache.hudi.exception.HoodieIOException;
 
+import org.apache.hadoop.conf.Configuration;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
@@ -40,6 +43,7 @@ public class HoodieCommonTestHarness {
   protected URI baseUri;
   protected HoodieTestDataGenerator dataGen;
   protected HoodieTableMetaClient metaClient;
+  private HoodieEngineContext engineContext;
   @TempDir
   public java.nio.file.Path tempDir;
 
@@ -51,8 +55,17 @@ public class HoodieCommonTestHarness {
    * Initializes basePath.
    */
   protected void initPath() {
+    initPath("dataset");
+  }
+
+  /**
+   * Initializes basePath with folder name.
+   *
+   * @param folderName Folder name.
+   */
+  protected void initPath(String folderName) {
     try {
-      java.nio.file.Path basePath = tempDir.resolve("dataset");
+      java.nio.file.Path basePath = tempDir.resolve(folderName);
       java.nio.file.Files.createDirectories(basePath);
       this.basePath = basePath.toAbsolutePath().toString();
       this.baseUri = basePath.toUri();
@@ -77,6 +90,7 @@ public class HoodieCommonTestHarness {
    */
   protected void cleanupTestDataGenerator() {
     if (dataGen != null) {
+      dataGen.close();
       dataGen = null;
     }
   }
@@ -109,7 +123,7 @@ public class HoodieCommonTestHarness {
   }
 
   protected SyncableFileSystemView getFileSystemView(HoodieTimeline timeline, boolean enableIncrementalTimelineSync) {
-    return new HoodieTableFileSystemView(metaClient, timeline, enableIncrementalTimelineSync);
+    return HoodieTableFileSystemView.fileListingBasedFileSystemView(getEngineContext(), metaClient, timeline, enableIncrementalTimelineSync);
   }
 
   protected SyncableFileSystemView getFileSystemView(HoodieTableMetaClient metaClient) throws IOException {
@@ -140,5 +154,12 @@ public class HoodieCommonTestHarness {
    */
   protected HoodieTableType getTableType() {
     return HoodieTableType.COPY_ON_WRITE;
+  }
+
+  protected HoodieEngineContext getEngineContext() {
+    if (engineContext == null) {
+      this.engineContext = new HoodieLocalEngineContext(new Configuration());
+    }
+    return this.engineContext;
   }
 }

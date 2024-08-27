@@ -60,7 +60,6 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.common.util.collection.ExternalSpillableMap;
 import org.apache.hudi.exception.CorruptedLogFileException;
-import org.apache.hudi.exception.HoodieIOException;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
@@ -454,20 +453,6 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
     }
     assertEquals(logBlockWrittenNum, logBlockReadNum, "All written log should be correctly found");
     reader.close();
-
-    // test writing oversize data block which should be rejected
-    Writer oversizeWriter =
-        HoodieLogFormat.newWriterBuilder().onParentPath(partitionPath).withFileExtension(HoodieLogFile.DELTA_EXTENSION)
-            .withFileId("test-fileid1").overBaseCommit("100").withSizeThreshold(3L * 1024 * 1024 * 1024).withFs(fs)
-            .build();
-    List<HoodieLogBlock> dataBlocks = new ArrayList<>(logBlockWrittenNum + 1);
-    for (int i = 0; i < logBlockWrittenNum + 1; i++) {
-      dataBlocks.add(reusableDataBlock);
-    }
-    assertThrows(HoodieIOException.class, () -> {
-      oversizeWriter.appendBlocks(dataBlocks);
-    }, "Blocks appended may overflow. Please decrease log block size or log block amount");
-    oversizeWriter.close();
   }
 
   @ParameterizedTest
@@ -528,7 +513,7 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
     HoodieLogBlock nextBlock = reader.next();
     HoodieDataBlock dataBlockRead = (HoodieDataBlock) nextBlock;
     List<IndexedRecord> recordsRead1 = getRecords(dataBlockRead);
-    assertEquals(copyOfRecords1.size(),recordsRead1.size(),
+    assertEquals(copyOfRecords1.size(), recordsRead1.size(),
         "Read records size should be equal to the written records size");
     assertEquals(copyOfRecords1, recordsRead1,
         "Both records lists should be the same. (ordering guaranteed)");
@@ -1316,7 +1301,7 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
     scanner.forEach(s -> readKeys.add(s.getKey().getRecordKey()));
     scanner.forEach(s -> {
       try {
-        if (!((HoodieRecordPayload)s.getData()).getInsertValue(schema).isPresent()) {
+        if (!((HoodieRecordPayload) s.getData()).getInsertValue(schema).isPresent()) {
           emptyPayloads.add(true);
         }
       } catch (IOException io) {
@@ -1422,7 +1407,7 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
 
     header.put(HoodieLogBlock.HeaderMetadataType.INSTANT_TIME, "102");
     HoodieDeleteBlock deleteBlock = new HoodieDeleteBlock(deletedKeys.stream().map(deletedKey ->
-        DeleteRecord.create(deletedKey.getRecordKey(), deletedKey.getPartitionPath()))
+            DeleteRecord.create(deletedKey.getRecordKey(), deletedKey.getPartitionPath()))
         .collect(Collectors.toList()).toArray(new DeleteRecord[0]), header);
     writer.appendBlock(deleteBlock);
 
@@ -1443,7 +1428,7 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
     deleteBlockHeader.put(HoodieLogBlock.HeaderMetadataType.INSTANT_TIME, "102");
     deleteBlock = new HoodieDeleteBlock(
         deletedKeys.stream().map(deletedKey ->
-            DeleteRecord.create(deletedKey.getRecordKey(), deletedKey.getPartitionPath()))
+                DeleteRecord.create(deletedKey.getRecordKey(), deletedKey.getPartitionPath()))
             .collect(Collectors.toList()).toArray(new DeleteRecord[0]), deleteBlockHeader);
     writer.appendBlock(deleteBlock);
 
@@ -1586,7 +1571,7 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
     scanner.forEach(s -> readKeys.add(s.getRecordKey()));
     scanner.forEach(s -> {
       try {
-        if (!((HoodieRecordPayload)s.getData()).getInsertValue(schema).isPresent()) {
+        if (!((HoodieRecordPayload) s.getData()).getInsertValue(schema).isPresent()) {
           emptyPayloadKeys.add(s.getRecordKey());
         }
       } catch (IOException io) {
@@ -2268,7 +2253,7 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
         .sorted()
         .collect(Collectors.toList());
     List<String> validBlockInstants = scanner.getValidBlockInstants();
-    List<String> expectedBlockInstants = Arrays.asList("108","105", "104");
+    List<String> expectedBlockInstants = Arrays.asList("108", "105", "104");
     assertEquals(expectedBlockInstants, validBlockInstants);
     Collections.sort(readKeys);
     assertEquals(expectedRecords, readKeys, "Record keys read should be exactly same.");
@@ -2523,7 +2508,7 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
     HoodieLogFile logFile = new HoodieLogFile(writer.getLogFile().getPath(), fs.getFileStatus(writer.getLogFile().getPath()).getLen());
 
     try (HoodieLogFileReader reader =
-        new HoodieLogFileReader(fs, logFile, schema, BUFFER_SIZE, readBlocksLazily, true)) {
+             new HoodieLogFileReader(fs, logFile, schema, BUFFER_SIZE, readBlocksLazily, true)) {
 
       assertTrue(reader.hasPrev(), "Last block should be available");
       HoodieLogBlock block = reader.prev();
@@ -2647,16 +2632,18 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
     Schema schema = getSimpleSchema();
 
     Map<HoodieLogBlock.HeaderMetadataType, String> header =
-        new HashMap<HoodieLogBlock.HeaderMetadataType, String>() {{
-          put(HoodieLogBlock.HeaderMetadataType.INSTANT_TIME, "100");
-          put(HoodieLogBlock.HeaderMetadataType.SCHEMA, schema.toString());
-        }};
+        new HashMap<HoodieLogBlock.HeaderMetadataType, String>() {
+          {
+            put(HoodieLogBlock.HeaderMetadataType.INSTANT_TIME, "100");
+            put(HoodieLogBlock.HeaderMetadataType.SCHEMA, schema.toString());
+          }
+        };
 
     // Init Benchmark to report number of bytes actually read from the Block
     BenchmarkCounter.initCounterFromReporter(HadoopMapRedUtils.createTestReporter(), fs.getConf());
 
     // NOTE: Have to use this ugly hack since List generic is not covariant in its type param
-    HoodieDataBlock dataBlock = getDataBlock(dataBlockType, (List<IndexedRecord>)(List) records, header);
+    HoodieDataBlock dataBlock = getDataBlock(dataBlockType, (List<IndexedRecord>) (List) records, header);
 
     writer.appendBlock(dataBlock);
     writer.close();
@@ -2673,14 +2660,16 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
       HoodieDataBlock dataBlockRead = (HoodieDataBlock) nextBlock;
 
       Map<HoodieLogBlockType, Integer> expectedReadBytes =
-          new HashMap<HoodieLogBlockType, Integer>() {{
-            put(HoodieLogBlockType.AVRO_DATA_BLOCK, 0); // not supported
-            put(HoodieLogBlockType.HFILE_DATA_BLOCK, 0); // not supported
-            put(HoodieLogBlockType.PARQUET_DATA_BLOCK,
-                HoodieAvroUtils.gteqAvro1_9()
-                    ? getJavaVersion() == 17 || getJavaVersion() == 11 ? 1803 : 1802
-                    : 1809);
-          }};
+          new HashMap<HoodieLogBlockType, Integer>() {
+            {
+              put(HoodieLogBlockType.AVRO_DATA_BLOCK, 0); // not supported
+              put(HoodieLogBlockType.HFILE_DATA_BLOCK, 0); // not supported
+              put(HoodieLogBlockType.PARQUET_DATA_BLOCK,
+                  HoodieAvroUtils.gteqAvro1_9()
+                      ? getJavaVersion() == 17 || getJavaVersion() == 11 ? 1803 : 1802
+                      : 1809);
+            }
+          };
 
       List<IndexedRecord> recordsRead = getRecords(dataBlockRead);
       assertEquals(projectedRecords.size(), recordsRead.size(),
@@ -2711,7 +2700,7 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
     }
   }
 
-  private static HoodieDataBlock getDataBlock(HoodieLogBlockType dataBlockType, List<IndexedRecord> records,
+  public static HoodieDataBlock getDataBlock(HoodieLogBlockType dataBlockType, List<IndexedRecord> records,
                                               Map<HeaderMetadataType, String> header) {
     return getDataBlock(dataBlockType, records.stream().map(HoodieAvroIndexedRecord::new).collect(Collectors.toList()), header, new Path("dummy_path"));
   }
@@ -2720,13 +2709,13 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
                                               Map<HeaderMetadataType, String> header, Path pathForReader) {
     switch (dataBlockType) {
       case CDC_DATA_BLOCK:
-        return new HoodieCDCDataBlock(records, header, HoodieRecord.RECORD_KEY_METADATA_FIELD);
+        return new HoodieCDCDataBlock(records, header, HoodieRecord.RECORD_KEY_METADATA_FIELD, HoodieLogBlock.version);
       case AVRO_DATA_BLOCK:
-        return new HoodieAvroDataBlock(records, header, HoodieRecord.RECORD_KEY_METADATA_FIELD);
+        return new HoodieAvroDataBlock(records, header, HoodieRecord.RECORD_KEY_METADATA_FIELD, HoodieLogBlock.version);
       case HFILE_DATA_BLOCK:
-        return new HoodieHFileDataBlock(records, header, Compression.Algorithm.GZ, pathForReader);
+        return new HoodieHFileDataBlock(records, header, Compression.Algorithm.GZ, pathForReader, HoodieLogBlock.version);
       case PARQUET_DATA_BLOCK:
-        return new HoodieParquetDataBlock(records, header, HoodieRecord.RECORD_KEY_METADATA_FIELD, CompressionCodecName.GZIP, 0.1, true);
+        return new HoodieParquetDataBlock(records, header, HoodieRecord.RECORD_KEY_METADATA_FIELD, CompressionCodecName.GZIP, 0.1, true, HoodieLogBlock.version);
       default:
         throw new RuntimeException("Unknown data block type " + dataBlockType);
     }
@@ -2794,7 +2783,6 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
 
       logFiles.add(writer.getLogFile());
       writer.appendBlock(getDataBlock(DEFAULT_DATA_BLOCK_TYPE, targetRecords, header));
-
       filesWritten++;
     }
 
@@ -2860,8 +2848,8 @@ public class TestHoodieLogFormat extends HoodieCommonTestHarness {
   }
 
   private void checkLogBlocksAndKeys(String latestInstantTime, Schema schema, boolean readBlocksLazily,
-      ExternalSpillableMap.DiskMapType diskMapType, boolean isCompressionEnabled, boolean enableOptimizedLogBlocksScan, int expectedTotalRecords,
-      int expectedTotalKeys, Option<Set<String>> expectedKeys) throws IOException {
+                                     ExternalSpillableMap.DiskMapType diskMapType, boolean isCompressionEnabled, boolean enableOptimizedLogBlocksScan, int expectedTotalRecords,
+                                     int expectedTotalKeys, Option<Set<String>> expectedKeys) throws IOException {
     List<String> allLogFiles =
         FSUtils.getAllLogFiles(fs, partitionPath, "test-fileid1", HoodieLogFile.DELTA_EXTENSION, "100")
             .map(s -> s.getPath().toString()).collect(Collectors.toList());

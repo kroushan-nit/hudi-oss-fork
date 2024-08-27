@@ -35,6 +35,7 @@ import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.util.CommitUtils;
+import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.collection.Pair;
@@ -157,6 +158,11 @@ public abstract class BaseSparkCommitActionExecutor<T> extends
 
   @Override
   public HoodieWriteMetadata<HoodieData<WriteStatus>> execute(HoodieData<HoodieRecord<T>> inputRecords) {
+    return this.execute(inputRecords, Option.empty());
+  }
+
+  @Override
+  public HoodieWriteMetadata<HoodieData<WriteStatus>> execute(HoodieData<HoodieRecord<T>> inputRecords, Option<HoodieTimer> preWriteTimer) {
     // Cache the tagged records, so we don't end up computing both
     JavaRDD<HoodieRecord<T>> inputRDD = HoodieJavaRDD.getJavaRDD(inputRecords);
     if (inputRDD.getStorageLevel() == StorageLevel.NONE()) {
@@ -168,11 +174,17 @@ public abstract class BaseSparkCommitActionExecutor<T> extends
 
     // Handle records update with clustering
     HoodieData<HoodieRecord<T>> inputRecordsWithClusteringUpdate = clusteringHandleUpdate(inputRecords);
+    LOG.info("Num spark partitions for inputRecords before triggering workload profile " + inputRecordsWithClusteringUpdate.getNumPartitions());
 
     context.setJobStatus(this.getClass().getSimpleName(), "Building workload profile:" + config.getTableName());
     WorkloadProfile workloadProfile =
             new WorkloadProfile(buildProfile(inputRecordsWithClusteringUpdate), operationType, table.getIndex().canIndexLogFiles());
     LOG.debug("Input workload profile :" + workloadProfile);
+    Long preWriteDurationMs = null;
+    if (preWriteTimer.isPresent()) {
+      preWriteDurationMs = preWriteTimer.get().endTimer();
+      LOG.info("Pre write timer " + preWriteDurationMs);
+    }
 
     // partition using the insert partitioner
     final Partitioner partitioner = getPartitioner(workloadProfile);
@@ -182,6 +194,9 @@ public abstract class BaseSparkCommitActionExecutor<T> extends
     HoodieData<WriteStatus> writeStatuses = mapPartitionsAsRDD(inputRecordsWithClusteringUpdate, partitioner);
     HoodieWriteMetadata<HoodieData<WriteStatus>> result = new HoodieWriteMetadata<>();
     updateIndexAndCommitIfNeeded(writeStatuses, result);
+    if (preWriteTimer.isPresent()) {
+      result.setPreWriteDurationMs(preWriteDurationMs);
+    }
     return result;
   }
 
@@ -286,7 +301,9 @@ public abstract class BaseSparkCommitActionExecutor<T> extends
 
   @Override
   protected void setCommitMetadata(HoodieWriteMetadata<HoodieData<WriteStatus>> result) {
-    result.setCommitMetadata(Option.of(CommitUtils.buildMetadata(result.getWriteStatuses().map(WriteStatus::getStat).collectAsList(),
+    List<HoodieWriteStat> writeStats = result.getWriteStatuses().map(WriteStatus::getStat).collectAsList();
+    result.setWriteStats(writeStats);
+    result.setCommitMetadata(Option.of(CommitUtils.buildMetadata(writeStats,
         result.getPartitionToReplaceFileIds(),
         extraMetadata, operationType, getSchemaToStoreInCommit(), getCommitActionType())));
   }
@@ -294,19 +311,18 @@ public abstract class BaseSparkCommitActionExecutor<T> extends
   @Override
   protected void commit(Option<Map<String, String>> extraMetadata, HoodieWriteMetadata<HoodieData<WriteStatus>> result) {
     context.setJobStatus(this.getClass().getSimpleName(), "Commit write status collect: " + config.getTableName());
-    commit(extraMetadata, result, result.getWriteStatuses().map(WriteStatus::getStat).collectAsList());
-  }
-
-  protected void commit(Option<Map<String, String>> extraMetadata, HoodieWriteMetadata<HoodieData<WriteStatus>> result, List<HoodieWriteStat> writeStats) {
     String actionType = getCommitActionType();
     LOG.info("Committing " + instantTime + ", action Type " + actionType + ", operation Type " + operationType);
     result.setCommitted(true);
-    result.setWriteStats(writeStats);
+    if (!result.getWriteStats().isPresent()) {
+      result.setWriteStats(result.getWriteStatuses().map(WriteStatus::getStat).collectAsList());
+    }
     // Finalize write
-    finalizeWrite(instantTime, writeStats, result);
+    finalizeWrite(instantTime, result.getWriteStats().get(), result);
     try {
       HoodieActiveTimeline activeTimeline = table.getActiveTimeline();
       HoodieCommitMetadata metadata = result.getCommitMetadata().get();
+      metadata = appendMetadataForMissingFiles(metadata);
       writeTableMetadata(metadata, result.getWriteStatuses(), actionType);
       activeTimeline.saveAsComplete(new HoodieInstant(true, getCommitActionType(), instantTime),
           Option.of(metadata.toJsonString().getBytes(StandardCharsets.UTF_8)));
@@ -316,6 +332,10 @@ public abstract class BaseSparkCommitActionExecutor<T> extends
       throw new HoodieCommitException("Failed to complete commit " + config.getBasePath() + " at time " + instantTime,
           e);
     }
+  }
+
+  protected HoodieCommitMetadata appendMetadataForMissingFiles(HoodieCommitMetadata commitMetadata) throws IOException {
+    return commitMetadata;
   }
 
   protected Map<String, List<String>> getPartitionToReplacedFileIds(HoodieWriteMetadata<HoodieData<WriteStatus>> writeStatuses) {
@@ -416,7 +436,7 @@ public abstract class BaseSparkCommitActionExecutor<T> extends
     if (profile == null) {
       throw new HoodieUpsertException("Need workload profile to construct the upsert partitioner.");
     }
-    return new UpsertPartitioner<>(profile, context, table, config);
+    return new UpsertPartitioner<>(profile, context, table, config, operationType);
   }
 
   public Partitioner getInsertPartitioner(WorkloadProfile profile) {

@@ -209,7 +209,7 @@ object DataSourceReadOptions {
         " by carefully analyzing provided partition-column predicates and deducing corresponding partition-path prefix from " +
         " them (if possible).")
 
-  val INCREMENTAL_FALLBACK_TO_FULL_TABLE_SCAN_FOR_NON_EXISTING_FILES: ConfigProperty[String] = ConfigProperty
+  val INCREMENTAL_FALLBACK_TO_FULL_TABLE_SCAN: ConfigProperty[String] = ConfigProperty
     .key("hoodie.datasource.read.incr.fallback.fulltablescan.enable")
     .defaultValue("false")
     .markAdvanced()
@@ -455,6 +455,7 @@ object DataSourceWriteOptions {
   val SQL_INSERT_MODE: ConfigProperty[String] = ConfigProperty
     .key("hoodie.sql.insert.mode")
     .defaultValue("upsert")
+    .markAdvanced()
     .deprecatedAfter("0.14.0")
     .withDocumentation("Insert mode when insert data to pk-table. The optional modes are: upsert, strict and non-strict." +
       "For upsert mode, insert statement do the upsert operation for the pk-table which will update the duplicate record." +
@@ -520,6 +521,7 @@ object DataSourceWriteOptions {
   val STREAMING_DISABLE_COMPACTION: ConfigProperty[String] = ConfigProperty
     .key("hoodie.datasource.write.streaming.disable.compaction")
     .defaultValue("false")
+    .markAdvanced()
     .sinceVersion("0.14.0")
     .withDocumentation("By default for MOR table, async compaction is enabled with spark streaming sink. "
       + "By setting this config to true, we can disable it and the expectation is that, users will schedule and execute "
@@ -532,7 +534,10 @@ object DataSourceWriteOptions {
     .markAdvanced()
     .withDocumentation("Sync tool class name used to sync to metastore. Defaults to Hive.")
 
+  @Deprecated
   val RECONCILE_SCHEMA: ConfigProperty[java.lang.Boolean] = HoodieCommonConfig.RECONCILE_SCHEMA
+
+  val SET_NULL_FOR_MISSING_COLUMNS: ConfigProperty[String] = HoodieCommonConfig.SET_NULL_FOR_MISSING_COLUMNS
 
   val MAKE_NEW_COLUMNS_NULLABLE: ConfigProperty[java.lang.Boolean] = HoodieCommonConfig.MAKE_NEW_COLUMNS_NULLABLE
 
@@ -540,6 +545,8 @@ object DataSourceWriteOptions {
     .key("hoodie.spark.sql.insert.into.operation")
     .defaultValue(WriteOperationType.INSERT.value())
     .withValidValues(WriteOperationType.BULK_INSERT.value(), WriteOperationType.INSERT.value(), WriteOperationType.UPSERT.value())
+    .markAdvanced()
+    .sinceVersion("0.14.0")
     .withDocumentation("Sql write operation to use with INSERT_INTO spark sql command. This comes with 3 possible values, bulk_insert, " +
       "insert and upsert. bulk_insert is generally meant for initial loads and is known to be performant compared to insert. But bulk_insert may not " +
       "do small file management. If you prefer hudi to automatically manage small files, then you can go with \"insert\". There is no precombine " +
@@ -555,6 +562,8 @@ object DataSourceWriteOptions {
     .key("hoodie.datasource.insert.dup.policy")
     .defaultValue(NONE_INSERT_DUP_POLICY)
     .withValidValues(NONE_INSERT_DUP_POLICY, DROP_INSERT_DUP_POLICY, FAIL_INSERT_DUP_POLICY)
+    .markAdvanced()
+    .sinceVersion("0.14.0")
     .withDocumentation("When operation type is set to \"insert\", users can optionally enforce a dedup policy. This policy will be employed "
       + " when records being ingested already exists in storage. Default policy is none and no action will be taken. Another option is to choose " +
     " \"drop\", on which matching records from incoming will be dropped and the rest will be ingested. Third option is \"fail\" which will " +
@@ -970,6 +979,9 @@ object DataSourceOptionsHelper {
     }
     if (!params.contains(HoodieWriteConfig.WRITE_PAYLOAD_CLASS_NAME.key()) && tableConfig.getPayloadClass != null) {
       missingWriteConfigs ++= Map(HoodieWriteConfig.WRITE_PAYLOAD_CLASS_NAME.key() -> tableConfig.getPayloadClass)
+    }
+    if (!params.contains(DataSourceWriteOptions.TABLE_TYPE.key())) {
+      missingWriteConfigs ++= Map(DataSourceWriteOptions.TABLE_TYPE.key() -> tableConfig.getTableType.name())
     }
     missingWriteConfigs.toMap
   }

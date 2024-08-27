@@ -21,6 +21,7 @@ package org.apache.hudi.client;
 import org.apache.hudi.avro.model.HoodieClusteringGroup;
 import org.apache.hudi.avro.model.HoodieClusteringPlan;
 import org.apache.hudi.client.embedded.EmbeddedTimelineService;
+import org.apache.hudi.client.utils.SparkReleaseResources;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieRecord;
@@ -65,12 +66,17 @@ public class SparkRDDTableServiceClient<T> extends BaseHoodieTableServiceClient<
   }
 
   @Override
-  protected HoodieData<WriteStatus> convertToWriteStatus(HoodieWriteMetadata<HoodieData<WriteStatus>> writeMetadata) {
-    return writeMetadata.getWriteStatuses();
+  protected HoodieData<WriteStatus> convertToWriteStatus(HoodieWriteMetadata<JavaRDD<WriteStatus>> clusteringMetadata) {
+    return HoodieJavaRDD.of(clusteringMetadata.getWriteStatuses());
   }
 
   @Override
   protected HoodieTable<?, HoodieData<HoodieRecord<T>>, ?, HoodieData<WriteStatus>> createTable(HoodieWriteConfig config, Configuration hadoopConf) {
     return HoodieSparkTable.create(config, context);
+  }
+
+  @Override
+  protected void releaseResources(String instantTime) {
+    SparkReleaseResources.releaseCachedData(context, config, basePath, instantTime);
   }
 }

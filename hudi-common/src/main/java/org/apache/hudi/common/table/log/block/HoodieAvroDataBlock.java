@@ -18,13 +18,14 @@
 
 package org.apache.hudi.common.table.log.block;
 
+import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.common.fs.SizeAwareDataInputStream;
 import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType;
+import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.common.util.collection.CloseableMappingIterator;
-import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.internal.schema.InternalSchema;
 
@@ -57,9 +58,11 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.function.Supplier;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.InflaterInputStream;
 
+import static org.apache.hudi.avro.HoodieAvroUtils.recordNeedsRewriteForExtendedAvroTypePromotion;
 import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 import static org.apache.hudi.common.util.ValidationUtils.checkState;
 
@@ -70,7 +73,18 @@ public class HoodieAvroDataBlock extends HoodieDataBlock {
 
   private final ThreadLocal<BinaryEncoder> encoderCache = new ThreadLocal<>();
 
-  public HoodieAvroDataBlock(FSDataInputStream inputStream,
+  /**
+   * Constructor used in read path.
+   * @param inputStreamSupplier
+   * @param content
+   * @param readBlockLazily
+   * @param logBlockContentLocation
+   * @param readerSchema
+   * @param header
+   * @param footer
+   * @param keyField
+   */
+  public HoodieAvroDataBlock(Supplier<FSDataInputStream> inputStreamSupplier,
                              Option<byte[]> content,
                              boolean readBlockLazily,
                              HoodieLogBlockContentLocation logBlockContentLocation,
@@ -78,14 +92,22 @@ public class HoodieAvroDataBlock extends HoodieDataBlock {
                              Map<HeaderMetadataType, String> header,
                              Map<HeaderMetadataType, String> footer,
                              String keyField) {
-    super(content, inputStream, readBlockLazily, Option.of(logBlockContentLocation), readerSchema, header, footer, keyField, false);
+    super(content, inputStreamSupplier, readBlockLazily, Option.of(logBlockContentLocation), readerSchema, header, footer,
+        keyField, false, HoodieLogBlock.version);
   }
 
   public HoodieAvroDataBlock(@Nonnull List<HoodieRecord> records,
-      @Nonnull Map<HeaderMetadataType, String> header,
-      @Nonnull String keyField
+                             @Nonnull Map<HeaderMetadataType, String> header,
+                             @Nonnull String keyField) {
+    this(records, header, keyField, HoodieLogBlock.version);
+  }
+
+  public HoodieAvroDataBlock(@Nonnull List<HoodieRecord> records,
+                             @Nonnull Map<HeaderMetadataType, String> header,
+                             @Nonnull String keyField,
+                             @Nonnull int logBlockVersionToWrite
   ) {
-    super(records, header, new HashMap<>(), keyField);
+    super(records, header, new HashMap<>(), keyField, logBlockVersionToWrite);
   }
 
   @Override
@@ -101,7 +123,7 @@ public class HoodieAvroDataBlock extends HoodieDataBlock {
     DataOutputStream output = new DataOutputStream(baos);
 
     // 1. Write out the log block version
-    output.writeInt(HoodieLogBlock.version);
+    output.writeInt(logBlockVersionToWrite);
 
     // 2. Write total number of records
     output.writeInt(records.size());
@@ -148,7 +170,7 @@ public class HoodieAvroDataBlock extends HoodieDataBlock {
     private final SizeAwareDataInputStream dis;
     private final GenericDatumReader<IndexedRecord> reader;
     private final ThreadLocal<BinaryDecoder> decoderCache = new ThreadLocal<>();
-
+    private Option<Schema> promotedSchema = Option.empty();
     private int totalRecords = 0;
     private int readRecords = 0;
 
@@ -163,7 +185,12 @@ public class HoodieAvroDataBlock extends HoodieDataBlock {
         this.totalRecords = this.dis.readInt();
       }
 
-      this.reader = new GenericDatumReader<>(writerSchema, readerSchema);
+      if (recordNeedsRewriteForExtendedAvroTypePromotion(writerSchema, readerSchema)) {
+        this.reader = new GenericDatumReader<>(writerSchema, writerSchema);
+        this.promotedSchema = Option.of(readerSchema);
+      } else {
+        this.reader = new GenericDatumReader<>(writerSchema, readerSchema);
+      }
     }
 
     public static RecordIterator getInstance(HoodieAvroDataBlock dataBlock, byte[] content) throws IOException {
@@ -196,6 +223,9 @@ public class HoodieAvroDataBlock extends HoodieDataBlock {
         IndexedRecord record = this.reader.read(null, decoder);
         this.dis.skipBytes(recordLength);
         this.readRecords++;
+        if (this.promotedSchema.isPresent()) {
+          return  HoodieAvroUtils.rewriteRecordWithNewSchema(record, this.promotedSchema.get());
+        }
         return record;
       } catch (IOException e) {
         throw new HoodieIOException("Unable to convert bytes to record.", e);
@@ -216,7 +246,8 @@ public class HoodieAvroDataBlock extends HoodieDataBlock {
    */
   @Deprecated
   public HoodieAvroDataBlock(List<HoodieRecord> records, Schema schema) {
-    super(records, Collections.singletonMap(HeaderMetadataType.SCHEMA, schema.toString()), new HashMap<>(), HoodieRecord.RECORD_KEY_METADATA_FIELD);
+    super(records, Collections.singletonMap(HeaderMetadataType.SCHEMA, schema.toString()), new HashMap<>(), HoodieRecord.RECORD_KEY_METADATA_FIELD,
+        HoodieLogBlock.version);
   }
 
   public static HoodieAvroDataBlock getBlock(byte[] content, Schema readerSchema) throws IOException {

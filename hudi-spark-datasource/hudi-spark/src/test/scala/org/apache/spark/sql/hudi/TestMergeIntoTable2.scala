@@ -917,6 +917,7 @@ class TestMergeIntoTable2 extends HoodieSparkSqlTestBase {
            | partitioned by(dt)
            | location '${tmp.getCanonicalPath}'
      """.stripMargin)
+      spark.sql("set hoodie.merge.allow.duplicate.on.inserts = false")
 
       spark.sql(
         s"""
@@ -940,6 +941,88 @@ class TestMergeIntoTable2 extends HoodieSparkSqlTestBase {
         Seq(1, "a1", 10.1, 1003, "2021-03-21"),
         Seq(3, "a3", 10.0, 2000, "2021-03-21")
       )
+    }
+  }
+
+  test("Test MOR Table with create empty partitions") {
+    withTempDir { tmp =>
+
+      val sourceTable = generateTableName
+      val path1 = tmp.getCanonicalPath.concat("/source")
+      spark.sql(
+        s"""
+           | create table $sourceTable (
+           |  id int,
+           |  name string,
+           |  price double,
+           |  ts long,
+           |  dt string
+           | ) using hudi
+           | tblproperties (
+           |  type = 'mor',
+           |  primaryKey = 'id',
+           |  preCombineField = 'ts'
+           | )
+           | partitioned by(dt)
+           | location '${path1}'
+         """.stripMargin)
+      spark.sql("set hoodie.merge.allow.duplicate.on.inserts = false")
+
+      spark.sql(s"insert into $sourceTable values(1, 'a1', cast(3.01 as double), 11, '2022-09-26'),(2, 'a2', cast(3.02 as double), 12, '2022-09-27'),(3, 'a3', cast(3.03 as double), 13, '2022-09-28'),(4, 'a4', cast(3.04 as double), 14, '2022-09-29')")
+
+      checkAnswer(s"select id, name, price, ts, dt from $sourceTable order by id")(
+        Seq(1, "a1", 3.01, 11,"2022-09-26"),
+        Seq(2, "a2", 3.02, 12,"2022-09-27"),
+        Seq(3, "a3", 3.03, 13,"2022-09-28"),
+        Seq(4, "a4", 3.04, 14,"2022-09-29")
+      )
+
+      val path2 = tmp.getCanonicalPath.concat("/target")
+      val destTable = generateTableName
+      spark.sql(
+        s"""
+           | create table $destTable (
+           |  id int,
+           |  name string,
+           |  price double,
+           |  ts long,
+           |  dt string
+           | ) using hudi
+           | tblproperties (
+           |  type = 'mor',
+           |  primaryKey = 'id',
+           |  preCombineField = 'ts'
+           | )
+           | partitioned by(dt)
+           | location '${path2}'
+         """.stripMargin)
+
+      spark.sql(s"insert into $destTable values(1, 'd1', cast(3.01 as double), 11, '2022-09-26'),(2, 'd2', cast(3.02 as double), 12, '2022-09-26'),(3, 'd3', cast(3.03 as double), 13, '2022-09-26')")
+
+      checkAnswer(s"select id, name, price, ts, dt from $destTable order by id")(
+        Seq(1, "d1", 3.01, 11,"2022-09-26"),
+        Seq(2, "d2", 3.02, 12,"2022-09-26"),
+        Seq(3, "d3", 3.03, 13,"2022-09-26")
+      )
+
+      // merge operation
+      spark.sql(
+        s"""
+           |merge into $destTable h0
+           |using (
+           | select id, name, price, ts, dt from $sourceTable
+           | ) s0
+           | on h0.id = s0.id and h0.dt = s0.dt
+           | when matched then update set *
+           |""".stripMargin)
+
+      checkAnswer(s"select id, name, price, ts, dt from $destTable order by id")(
+        Seq(1, "a1", 3.01, 11,"2022-09-26"),
+        Seq(2, "d2", 3.02, 12,"2022-09-26"),
+        Seq(3, "d3", 3.03, 13,"2022-09-26")
+      )
+      // check partitions
+      checkAnswer(s"show partitions $destTable")(Seq("dt=2022-09-26"))
     }
   }
 }

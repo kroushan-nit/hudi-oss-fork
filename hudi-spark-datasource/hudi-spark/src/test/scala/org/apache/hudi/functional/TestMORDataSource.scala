@@ -17,11 +17,10 @@
 
 package org.apache.hudi.functional
 
-import org.apache.hadoop.fs.Path
 import org.apache.hudi.DataSourceWriteOptions._
 import org.apache.hudi.HoodieConversionUtils.toJavaOption
 import org.apache.hudi.client.SparkRDDWriteClient
-import org.apache.hudi.common.config.TimestampKeyGeneratorConfig.{TIMESTAMP_INPUT_DATE_FORMAT, TIMESTAMP_OUTPUT_DATE_FORMAT, TIMESTAMP_TIMEZONE_FORMAT, TIMESTAMP_TYPE_FIELD}
+import org.apache.hudi.common.config.TimestampKeyGeneratorConfig.{TIMESTAMP_INPUT_DATE_FORMAT, TIMESTAMP_INPUT_TIMEZONE_FORMAT, TIMESTAMP_OUTPUT_DATE_FORMAT, TIMESTAMP_OUTPUT_TIMEZONE_FORMAT, TIMESTAMP_TIMEZONE_FORMAT, TIMESTAMP_TYPE_FIELD}
 import org.apache.hudi.common.config.{HoodieMetadataConfig, HoodieStorageConfig}
 import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType
 import org.apache.hudi.common.model._
@@ -37,17 +36,22 @@ import org.apache.hudi.table.action.compact.CompactionTriggerStrategy
 import org.apache.hudi.testutils.{DataSourceTestUtils, HoodieSparkClientTestBase}
 import org.apache.hudi.util.JFunction
 import org.apache.hudi.{DataSourceReadOptions, DataSourceUtils, DataSourceWriteOptions, HoodieDataSourceHelpers, HoodieSparkRecordMerger, SparkDatasetMixin}
+
+import org.apache.hadoop.fs.Path
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.hudi.HoodieSparkSessionExtension
-import org.apache.spark.sql.types.BooleanType
+import org.apache.spark.sql.types.{BooleanType, StringType, StructField, StructType}
+import org.joda.time.{DateTime, DateTimeZone}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.{CsvSource, EnumSource}
 import org.slf4j.LoggerFactory
 
+import java.util.TimeZone
 import java.util.function.Consumer
+
 import scala.collection.JavaConversions.mapAsJavaMap
 import scala.collection.JavaConverters._
 
@@ -996,6 +1000,89 @@ class TestMORDataSource extends HoodieSparkClientTestBase with SparkDatasetMixin
 
   @ParameterizedTest
   @EnumSource(value = classOf[HoodieRecordType], names = Array("AVRO", "SPARK"))
+  def testClusteringSamePrecombine(recordType: HoodieRecordType): Unit = {
+    var writeOpts = Map(
+      "hoodie.insert.shuffle.parallelism" -> "4",
+      "hoodie.upsert.shuffle.parallelism" -> "4",
+      DataSourceWriteOptions.RECORDKEY_FIELD.key -> "_row_key",
+      DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "partition",
+      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "timestamp",
+      HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
+      DataSourceWriteOptions.OPERATION.key() -> DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
+      DataSourceWriteOptions.TABLE_TYPE.key()-> DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL,
+      "hoodie.clustering.inline"-> "true",
+      "hoodie.clustering.inline.max.commits" -> "2",
+      "hoodie.clustering.plan.strategy.sort.columns" -> "_row_key",
+      "hoodie.metadata.enable" -> "false",
+      "hoodie.datasource.write.row.writer.enable" -> "false"
+    )
+    if (recordType.equals(HoodieRecordType.SPARK)) {
+      writeOpts = Map(HoodieWriteConfig.RECORD_MERGER_IMPLS.key -> classOf[HoodieSparkRecordMerger].getName,
+        HoodieStorageConfig.LOGFILE_DATA_BLOCK_FORMAT.key -> "parquet") ++ writeOpts
+    }
+    val records1 = recordsToStrings(dataGen.generateInserts("001", 10)).asScala
+    val inputDF1: Dataset[Row] = spark.read.json(spark.sparkContext.parallelize(records1, 2))
+    inputDF1.write.format("org.apache.hudi")
+      .options(writeOpts)
+      .mode(SaveMode.Overwrite)
+      .save(basePath)
+
+    val records2 = recordsToStrings(dataGen.generateUniqueUpdates("002", 5)).asScala
+    val inputDF2: Dataset[Row] = spark.read.json(spark.sparkContext.parallelize(records2, 2))
+    inputDF2.write.format("org.apache.hudi")
+      .options(writeOpts)
+      .mode(SaveMode.Append)
+      .save(basePath)
+
+    assertEquals(5,
+      spark.read.format("hudi").load(basePath)
+        .select("_row_key", "partition", "rider")
+        .except(inputDF2.select("_row_key", "partition", "rider")).count())
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = classOf[HoodieRecordType], names = Array("AVRO", "SPARK"))
+  def testClusteringSamePrecombineWithDelete(recordType: HoodieRecordType): Unit = {
+    var writeOpts = Map(
+      "hoodie.insert.shuffle.parallelism" -> "4",
+      "hoodie.upsert.shuffle.parallelism" -> "4",
+      DataSourceWriteOptions.RECORDKEY_FIELD.key -> "_row_key",
+      DataSourceWriteOptions.PARTITIONPATH_FIELD.key -> "partition",
+      DataSourceWriteOptions.PRECOMBINE_FIELD.key -> "timestamp",
+      HoodieWriteConfig.TBL_NAME.key -> "hoodie_test",
+      DataSourceWriteOptions.OPERATION.key() -> DataSourceWriteOptions.UPSERT_OPERATION_OPT_VAL,
+      DataSourceWriteOptions.TABLE_TYPE.key() -> DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL,
+      "hoodie.clustering.inline" -> "true",
+      "hoodie.clustering.inline.max.commits" -> "2",
+      "hoodie.clustering.plan.strategy.sort.columns" -> "_row_key",
+      "hoodie.metadata.enable" -> "false",
+      "hoodie.datasource.write.row.writer.enable" -> "false"
+    )
+    if (recordType.equals(HoodieRecordType.SPARK)) {
+      writeOpts = Map(HoodieWriteConfig.RECORD_MERGER_IMPLS.key -> classOf[HoodieSparkRecordMerger].getName,
+        HoodieStorageConfig.LOGFILE_DATA_BLOCK_FORMAT.key -> "parquet") ++ writeOpts
+    }
+    val records1 = recordsToStrings(dataGen.generateInserts("001", 10)).asScala
+    val inputDF1: Dataset[Row] = spark.read.json(spark.sparkContext.parallelize(records1, 2))
+    inputDF1.write.format("org.apache.hudi")
+      .options(writeOpts)
+      .mode(SaveMode.Overwrite)
+      .save(basePath)
+
+    writeOpts = writeOpts + (DataSourceWriteOptions.OPERATION.key() -> DataSourceWriteOptions.DELETE_OPERATION_OPT_VAL)
+    val records2 = recordsToStrings(dataGen.generateUniqueUpdates("002", 5)).asScala
+    val inputDF2: Dataset[Row] = spark.read.json(spark.sparkContext.parallelize(records2, 2))
+    inputDF2.write.format("org.apache.hudi")
+      .options(writeOpts)
+      .mode(SaveMode.Append)
+      .save(basePath)
+
+    assertEquals(5,
+      spark.read.format("hudi").load(basePath).count())
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = classOf[HoodieRecordType], names = Array("AVRO", "SPARK"))
   def testHoodieIsDeletedMOR(recordType: HoodieRecordType): Unit =  {
     val (writeOpts, readOpts) = getWriterReaderOpts(recordType)
 
@@ -1126,6 +1213,129 @@ class TestMORDataSource extends HoodieSparkClientTestBase with SparkDatasetMixin
     assertEquals(incrementalQueryRes.where("partition = '2022-01-02'").count, 20)
   }
 
+  @ParameterizedTest
+  @CsvSource(Array("true,AVRO,yyyy-MM-dd,UTC,UTC,UTC,UTC", "true,SPARK,yyyy-MM,EDT,CST,EDT,EDT",
+    "false,AVRO,yyyy,EST,IST,IST,IST", "false,SPARK,yyyy/MM/dd,EST,MST,SGT,GMT", "false,SPARK,yyyy/MM/dd,EST,,SGT,GMT"))
+  def testPrunePartitionForTimestampBasedKeyGeneratorWithInformationLoss(enableFileIndex: Boolean,
+                                                                         recordType: HoodieRecordType,
+                                                                         timestampOutputFormat: String,
+                                                                         timestampInputTimezone: String,
+                                                                         timestampOutputTimezone: String,
+                                                                         writeTimezone: String,
+                                                                         readTimezone: String): Unit = {
+    val (writeOpts, readOpts) = getWriterReaderOpts(recordType, enableFileIndex = enableFileIndex)
+    val outputTimezone = if (timestampOutputTimezone == null) {
+      DateTimeZone.UTC
+    } else {
+      DateTimeZone.forTimeZone(TimeZone.getTimeZone(timestampOutputTimezone))
+    }
+
+    val writeZone = DateTimeZone.forTimeZone(TimeZone.getTimeZone(writeTimezone))
+    val readZone = DateTimeZone.forTimeZone(TimeZone.getTimeZone(readTimezone))
+
+    val inputFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ"
+    var options = commonOpts ++ Map(
+      "hoodie.compact.inline" -> "false",
+      DataSourceWriteOptions.TABLE_TYPE.key -> DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL,
+      DataSourceWriteOptions.KEYGENERATOR_CLASS_NAME.key -> "org.apache.hudi.keygen.TimestampBasedKeyGenerator",
+      TIMESTAMP_TYPE_FIELD.key -> "DATE_STRING",
+      TIMESTAMP_OUTPUT_DATE_FORMAT.key -> timestampOutputFormat,
+      TIMESTAMP_INPUT_TIMEZONE_FORMAT.key -> timestampInputTimezone,
+      TIMESTAMP_INPUT_DATE_FORMAT.key -> inputFormat
+    ) ++ writeOpts + (PARTITIONPATH_FIELD.key() -> "extra_partition_field")
+    if (timestampOutputTimezone != null) {
+      options = options + (TIMESTAMP_OUTPUT_TIMEZONE_FORMAT.key -> timestampOutputTimezone)
+    }
+
+    val dataGen = new HoodieTestDataGenerator()
+    val records1 = recordsToStrings(dataGen.generateInserts("001", 96)).asScala
+    var inputDF1 = spark.read.json(spark.sparkContext.parallelize(records1, 1)).orderBy("_row_key")
+    val timestampColumnValues = Seq.range(0, 96).map(i => Row(new DateTime(2024, 7, 29, i / 4, 15 * (i % 4), outputTimezone).withZone(writeZone).toString(inputFormat)))
+    var timestampDf = spark.createDataFrame(spark.sparkContext.parallelize(timestampColumnValues, 1), StructType(Seq(StructField("extra_partition_field", StringType))))
+    timestampDf = timestampDf.withColumn("dateid", monotonically_increasing_id())
+
+    inputDF1 = inputDF1.withColumn("dateid", monotonically_increasing_id())
+    inputDF1 = inputDF1.join(timestampDf, "dateid").repartition(6)
+
+    inputDF1.write.format("org.apache.hudi")
+      .options(options)
+      .mode(SaveMode.Overwrite)
+      .save(basePath)
+
+    spark.read.format("hudi").options(readOpts).load(basePath).createTempView("firstwrite")
+
+    val fiveFourFiveTS = new DateTime(2024, 7, 29, 5, 45, outputTimezone).withZone(readZone).toString(inputFormat)
+    val sixFourFiveTS = new DateTime(2024, 7, 29, 6, 45, outputTimezone).withZone(readZone).toString(inputFormat)
+
+    val fiveFourFourTS = new DateTime(2024, 7, 29, 5, 44, 59, 999, outputTimezone).withZone(readZone).toString(inputFormat)
+    val sixFourFivePlusTS = new DateTime(2024, 7, 29, 6, 45, 0, 1, outputTimezone).withZone(readZone).toString(inputFormat)
+
+    val id545 = 23L
+    val id600 = 24L
+    val id615 = 25L
+    val id630 = 26L
+    val id645 = 27L
+
+    assertEquals(id600 + id615 + id630, spark.sql(s"""select * from firstwrite where firstwrite.extra_partition_field > to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") """
+      + s""" and firstwrite.extra_partition_field < to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ")""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id600 + id615 + id630, spark.sql(s"""select * from firstwrite where to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") < firstwrite.extra_partition_field"""
+      + s""" and to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") > firstwrite.extra_partition_field""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id545 + id600 + id615 + id630 + id645, spark.sql(s"""select * from firstwrite where firstwrite.extra_partition_field > to_timestamp("$fiveFourFourTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") """
+      + s""" and firstwrite.extra_partition_field < to_timestamp("$sixFourFivePlusTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ")""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id545 + id600 + id615 + id630 + id645, spark.sql(s"""select * from firstwrite where to_timestamp("$fiveFourFourTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") < firstwrite.extra_partition_field"""
+      + s""" and to_timestamp("$sixFourFivePlusTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") > firstwrite.extra_partition_field""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id545 + id600 + id615 + id630 + id645, spark.sql(s"""select * from firstwrite where firstwrite.extra_partition_field >= to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") """
+      + s""" and firstwrite.extra_partition_field <= to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ")""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id545 + id600 + id615 + id630 + id645, spark.sql(s"""select * from firstwrite where to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") <= firstwrite.extra_partition_field"""
+      + s""" and to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") >= firstwrite.extra_partition_field""").agg(sum("dateid")).first.get(0))
+
+    val records2 = recordsToStrings(dataGen.generateUniqueUpdates("002", 96)).asScala
+    var inputDF2 = spark.read.json(spark.sparkContext.parallelize(records2, 1)).orderBy("_row_key")
+    var timestampDf2 = spark.createDataFrame(spark.sparkContext.parallelize(timestampColumnValues, 1), StructType(Seq(StructField("extra_partition_field", StringType))))
+    timestampDf2 = timestampDf2.withColumn("dateid", monotonically_increasing_id())
+
+    inputDF2 = inputDF2.withColumn("dateid", monotonically_increasing_id())
+    inputDF2 = inputDF2.join(timestampDf2, "dateid").filter("dateid % 2 == 0").repartition(6)
+
+    inputDF2.write.format("org.apache.hudi")
+      .options(options)
+      .mode(SaveMode.Append)
+      .save(basePath)
+
+
+    spark.read.format("hudi").options(readOpts).load(basePath).createTempView("secondwrite")
+
+    assertEquals(id600 + id615 + id630, spark.sql(s"""select * from secondwrite where secondwrite.extra_partition_field > to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") """
+      + s""" and secondwrite.extra_partition_field < to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ")""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id600 + id615 + id630, spark.sql(s"""select * from secondwrite where to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") < secondwrite.extra_partition_field"""
+      + s""" and to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") > secondwrite.extra_partition_field""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id545 + id600 + id615 + id630 + id645, spark.sql(s"""select * from secondwrite where secondwrite.extra_partition_field > to_timestamp("$fiveFourFourTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") """
+      + s""" and secondwrite.extra_partition_field < to_timestamp("$sixFourFivePlusTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ")""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id545 + id600 + id615 + id630 + id645, spark.sql(s"""select * from secondwrite where to_timestamp("$fiveFourFourTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") < secondwrite.extra_partition_field"""
+      + s""" and to_timestamp("$sixFourFivePlusTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") > secondwrite.extra_partition_field""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id545 + id600 + id615 + id630 + id645, spark.sql(s"""select * from secondwrite where secondwrite.extra_partition_field >= to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") """
+      + s""" and secondwrite.extra_partition_field <= to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ")""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id545 + id600 + id615 + id630 + id645, spark.sql(s"""select * from secondwrite where to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") <= secondwrite.extra_partition_field"""
+      + s""" and to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") >= secondwrite.extra_partition_field""").agg(sum("dateid")).first.get(0))
+
+
+    assertEquals(id600 + id630, spark.sql(s"""select * from secondwrite where secondwrite.driver = 'driver-002' and secondwrite.extra_partition_field > to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") """
+      + s""" and secondwrite.extra_partition_field < to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ")""").agg(sum("dateid")).first.get(0))
+
+    assertEquals(id600 + id630, spark.sql(s"""select * from secondwrite where secondwrite.driver = 'driver-002' and  to_timestamp("$fiveFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") < secondwrite.extra_partition_field"""
+      + s""" and to_timestamp("$sixFourFiveTS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ") > secondwrite.extra_partition_field""").agg(sum("dateid")).first.get(0))
+  }
+
   /**
    * Test read-optimized query on MOR during inflight compaction.
    *
@@ -1225,6 +1435,8 @@ class TestMORDataSource extends HoodieSparkClientTestBase with SparkDatasetMixin
 
     thirdDf.write.format("hudi")
       .options(writeOpts)
+      // need to disable inline compaction for this test to avoid the compaction instant being completed
+      .option(HoodieCompactionConfig.INLINE_COMPACT.key, "false")
       .mode(SaveMode.Append).save(tablePath)
 
     // Read-optimized query on MOR
@@ -1296,6 +1508,55 @@ class TestMORDataSource extends HoodieSparkClientTestBase with SparkDatasetMixin
     val readRows = sort(snapshotDF1.drop(HoodieRecord.HOODIE_META_COLUMNS.asScala: _*)).collectAsList()
 
     assertEquals(inputRows, readRows)
+  }
+
+  @Test
+  def testEmptyPrecombine() : Unit  = {
+      val readType = HoodieRecordType.AVRO
+      val writeType = HoodieRecordType.AVRO
+      val (_, readOpts) = getWriterReaderOpts(readType)
+      var (writeOpts, _) = getWriterReaderOpts(writeType)
+      writeOpts = writeOpts ++ Map(HoodieWriteConfig.WRITE_PAYLOAD_CLASS_NAME.key()
+        -> classOf[OverwriteWithLatestAvroPayload].getName.toString) ++
+        Map(HoodieWriteConfig.PRECOMBINE_FIELD_NAME.key() -> "") ++
+        Map(DataSourceWriteOptions.TABLE_TYPE.key() -> "MERGE_ON_READ")
+
+      val records1 = recordsToStrings(dataGen.generateInserts("001", 100)).asScala
+      val inputDF1 = spark.read.json(spark.sparkContext.parallelize(records1, 2))
+      inputDF1.write.format("org.apache.hudi")
+        .options(writeOpts)
+        .option("hoodie.compact.inline", "false") // else fails due to compaction & deltacommit instant times being same
+        .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+        .option(DataSourceWriteOptions.TABLE_TYPE.key, DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL)
+        .mode(SaveMode.Overwrite)
+        .save(basePath)
+      assertTrue(HoodieDataSourceHelpers.hasNewCommits(fs, basePath, "000"))
+      val hudiSnapshotDF1 = spark.read.format("org.apache.hudi")
+        .options(readOpts)
+        .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_SNAPSHOT_OPT_VAL)
+        .load(basePath)
+      assertEquals(100, hudiSnapshotDF1.count()) // still 100, since we only updated
+
+      // Second Operation:
+      // SNAPSHOT view should read the log files only with the latest commit time.
+      val records2 = recordsToStrings(dataGen.generateUniqueUpdates("002", 100)).asScala
+      val inputDF2: Dataset[Row] = spark.read.json(spark.sparkContext.parallelize(records2, 2))
+      inputDF2.write.format("org.apache.hudi")
+        .options(writeOpts)
+        .mode(SaveMode.Append)
+        .save(basePath)
+      val hudiSnapshotDF2 = spark.read.format("org.apache.hudi")
+        .options(readOpts)
+        .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_SNAPSHOT_OPT_VAL)
+        .load(basePath)
+      assertEquals(100, hudiSnapshotDF2.count()) // still 100, since we only updated
+      val commit1Time = hudiSnapshotDF1.select("_hoodie_commit_time").head().get(0).toString
+      val commit2Time = hudiSnapshotDF2.select("_hoodie_commit_time").head().get(0).toString
+      assertEquals(hudiSnapshotDF2.select("_hoodie_commit_time").distinct().count(), 1)
+      assertTrue(commit2Time > commit1Time)
+      assertEquals(100, hudiSnapshotDF2.join(hudiSnapshotDF1, Seq("_hoodie_record_key"), "left").count())
+      val hudiWithoutMeta = hudiSnapshotDF2.drop(HoodieRecord.HOODIE_META_COLUMNS.asScala: _*)
+      assertEquals(inputDF2.except(hudiWithoutMeta).count(), 0)
   }
 
   def getWriterReaderOpts(recordType: HoodieRecordType,

@@ -18,7 +18,6 @@
 
 package org.apache.hudi.table.action.rollback;
 
-import org.apache.hadoop.fs.Path;
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackPlan;
 import org.apache.hudi.client.heartbeat.HoodieHeartbeatClient;
@@ -26,7 +25,6 @@ import org.apache.hudi.client.transaction.TransactionManager;
 import org.apache.hudi.common.HoodieRollbackStat;
 import org.apache.hudi.common.bootstrap.index.BootstrapIndex;
 import org.apache.hudi.common.engine.HoodieEngineContext;
-import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
@@ -43,6 +41,7 @@ import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.BaseActionExecutor;
 import org.apache.hudi.table.marker.WriteMarkersFactory;
 
+import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -120,6 +119,9 @@ public abstract class BaseRollbackActionExecutor<T, I, K, O> extends BaseActionE
     // Finally, remove the markers post rollback.
     WriteMarkersFactory.get(config.getMarkersType(), table, instantToRollback.getTimestamp())
         .quietDeleteMarkerDir(context, config.getMarkersDeleteParallelism());
+    // For MOR table rollbacks, rollback command blocks might generate markers under rollback instant. So, lets clean up the markers if any.
+    WriteMarkersFactory.get(config.getMarkersType(), table, rollbackInstant.getTimestamp())
+        .quietDeleteMarkerDir(context, config.getMarkersDeleteParallelism());
 
     return rollbackMetadata;
   }
@@ -189,7 +191,7 @@ public abstract class BaseRollbackActionExecutor<T, I, K, O> extends BaseActionE
         if (!instant.getAction().equals(HoodieTimeline.REPLACE_COMMIT_ACTION)) {
           return true;
         }
-        return !ClusteringUtils.isPendingClusteringInstant(table.getMetaClient(), instant);
+        return !ClusteringUtils.isClusteringInstant(table.getActiveTimeline(), instant);
       }).map(HoodieInstant::getTimestamp)
           .collect(Collectors.toList());
       if ((instantTimeToRollback != null) && !inflights.isEmpty()
@@ -240,7 +242,7 @@ public abstract class BaseRollbackActionExecutor<T, I, K, O> extends BaseActionE
    * @return list of {@link HoodieRollbackStat}s.
    */
   protected List<HoodieRollbackStat> executeRollback(HoodieInstant instantToRollback, HoodieRollbackPlan rollbackPlan) {
-    return new BaseRollbackHelper(table.getMetaClient(), config).performRollback(context, instantToRollback, rollbackPlan.getRollbackRequests());
+    return new BaseRollbackHelper(table, config).performRollback(context, instantTime, instantToRollback, rollbackPlan.getRollbackRequests());
   }
 
   protected void finishRollback(HoodieInstant inflightInstant, HoodieRollbackMetadata rollbackMetadata) throws HoodieIOException {
@@ -254,17 +256,18 @@ public abstract class BaseRollbackActionExecutor<T, I, K, O> extends BaseActionE
       // Then transition the inflight rollback to completed state.
       if (!skipTimelinePublish) {
         writeTableMetadata(rollbackMetadata);
+      }
+
+      // Then we delete the inflight instant in the data table timeline if enabled
+      deleteInflightAndRequestedInstant(deleteInstants, table.getActiveTimeline(), resolvedInstant);
+
+      // If publish the rollback to the timeline, we finally transition the inflight rollback
+      // to complete in the data table timeline
+      if (!skipTimelinePublish) {
         table.getActiveTimeline().transitionRollbackInflightToComplete(inflightInstant,
             TimelineMetadataUtils.serializeRollbackMetadata(rollbackMetadata));
         LOG.info("Rollback of Commits " + rollbackMetadata.getCommitsRollback() + " is complete");
       }
-
-      // Commit to rollback instant files are deleted after the rollback commit is transitioned from inflight to completed
-      // If job were to fail after transitioning rollback from inflight to complete and before delete the instant files,
-      // then subsequent retries of the rollback for this instant will see if there is a completed rollback present for this instant
-      // and then directly delete the files and abort.
-      deleteInflightAndRequestedInstant(deleteInstants, table.getActiveTimeline(), table.getMetaClient(), resolvedInstant);
-
     } catch (IOException e) {
       throw new HoodieIOException("Error executing rollback at instant " + instantTime, e);
     } finally {
@@ -280,13 +283,14 @@ public abstract class BaseRollbackActionExecutor<T, I, K, O> extends BaseActionE
    * @param activeTimeline Hoodie active timeline
    * @param instantToBeDeleted Instant to be deleted
    */
-  public static void deleteInflightAndRequestedInstant(boolean deleteInstant, HoodieActiveTimeline activeTimeline,
-                                                       HoodieTableMetaClient metaClient, HoodieInstant instantToBeDeleted) {
+  protected void deleteInflightAndRequestedInstant(boolean deleteInstant,
+                                                   HoodieActiveTimeline activeTimeline,
+                                                   HoodieInstant instantToBeDeleted) {
     // Remove the rolled back inflight commits
     if (deleteInstant) {
       LOG.info("Deleting instant=" + instantToBeDeleted);
       activeTimeline.deletePending(instantToBeDeleted);
-      if (instantToBeDeleted.isInflight() && !metaClient.getTimelineLayoutVersion().isNullVersion()) {
+      if (instantToBeDeleted.isInflight() && !table.getMetaClient().getTimelineLayoutVersion().isNullVersion()) {
         // Delete corresponding requested instant
         instantToBeDeleted = new HoodieInstant(HoodieInstant.State.REQUESTED, instantToBeDeleted.getAction(),
             instantToBeDeleted.getTimestamp());

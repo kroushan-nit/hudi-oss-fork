@@ -123,7 +123,7 @@ public class HoodieMergeHelper<T> extends BaseMergeHelper {
         // In case writer's schema is simply a projection of the reader's one we can read
         // the records in the projected schema directly
         recordSchema = isPureProjection ? writerSchema : readerSchema;
-        recordIterator = baseFileReader.getRecordIterator(recordSchema);
+        recordIterator = (ClosableIterator<HoodieRecord>) baseFileReader.getRecordIterator(recordSchema);
       }
 
       boolean isBufferingRecords = ExecutorFactory.isBufferingRecords(writeConfig);
@@ -155,6 +155,9 @@ public class HoodieMergeHelper<T> extends BaseMergeHelper {
         executor.awaitTermination();
       } else {
         baseFileReader.close();
+        if (bootstrapFileReader != null) {
+          bootstrapFileReader.close();
+        }
         mergeHandle.close();
       }
     }
@@ -169,7 +172,7 @@ public class HoodieMergeHelper<T> extends BaseMergeHelper {
     // TODO support bootstrap
     if (querySchemaOpt.isPresent() && !baseFile.getBootstrapBaseFile().isPresent()) {
       // check implicitly add columns, and position reorder(spark sql may change cols order)
-      InternalSchema querySchema = AvroSchemaEvolutionUtils.reconcileSchema(writerSchema, querySchemaOpt.get());
+      InternalSchema querySchema = AvroSchemaEvolutionUtils.reconcileSchema(writerSchema, querySchemaOpt.get(), writeConfig.getBooleanOrDefault(HoodieCommonConfig.SET_NULL_FOR_MISSING_COLUMNS));
       long commitInstantTime = Long.parseLong(baseFile.getCommitTime());
       InternalSchema fileSchema = InternalSchemaCache.getInternalSchemaByVersionId(commitInstantTime, metaClient);
       if (fileSchema.isEmptySchema() && writeConfig.getBoolean(HoodieCommonConfig.RECONCILE_SCHEMA)) {

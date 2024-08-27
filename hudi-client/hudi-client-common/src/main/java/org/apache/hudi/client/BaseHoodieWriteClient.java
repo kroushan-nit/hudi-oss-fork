@@ -163,6 +163,7 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
     super(context, writeConfig, timelineService);
     this.index = createIndex(writeConfig);
     this.upgradeDowngradeHelper = upgradeDowngradeHelper;
+    this.metrics.emitIndexTypeMetrics(config.getIndexType().ordinal());
   }
 
   protected abstract HoodieIndex<?, ?> createIndex(HoodieWriteConfig writeConfig);
@@ -222,10 +223,11 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
     LOG.info("Committing " + instantTime + " action " + commitActionType);
     // Create a Hoodie table which encapsulated the commits and files visible
     HoodieTable table = createTable(config, hadoopConf);
-    HoodieCommitMetadata metadata = CommitUtils.buildMetadata(stats, partitionToReplaceFileIds,
+    HoodieCommitMetadata originalMetadata = CommitUtils.buildMetadata(stats, partitionToReplaceFileIds,
         extraMetadata, operationType, config.getWriteSchema(), commitActionType);
     HoodieInstant inflightInstant = new HoodieInstant(State.INFLIGHT, commitActionType, instantTime);
     HeartbeatUtils.abortIfHeartbeatExpired(instantTime, table, heartbeatClient, config);
+    HoodieCommitMetadata metadata = reconcileCommitMetadata(table, commitActionType, instantTime, originalMetadata);
     this.txnManager.beginTransaction(Option.of(inflightInstant),
         lastCompletedTxnAndMetadata.isPresent() ? Option.of(lastCompletedTxnAndMetadata.get().getLeft()) : Option.empty());
     try {
@@ -236,11 +238,11 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
       commit(table, commitActionType, instantTime, metadata, stats, writeStatuses);
       postCommit(table, metadata, instantTime, extraMetadata);
       LOG.info("Committed " + instantTime);
-      releaseResources(instantTime);
     } catch (IOException e) {
       throw new HoodieCommitException("Failed to complete commit " + config.getBasePath() + " at time " + instantTime, e);
     } finally {
       this.txnManager.endTransaction(Option.of(inflightInstant));
+      releaseResources(instantTime);
     }
 
     // trigger clean and archival.
@@ -265,30 +267,36 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
       if (null == commitCallback) {
         commitCallback = HoodieCommitCallbackFactory.create(config);
       }
-      commitCallback.call(new HoodieWriteCommitCallbackMessage(instantTime, config.getTableName(), config.getBasePath(), stats));
+      commitCallback.call(new HoodieWriteCommitCallbackMessage(
+          instantTime, config.getTableName(), config.getBasePath(), stats, Option.of(commitActionType), extraMetadata));
     }
     return true;
+  }
+
+  protected HoodieCommitMetadata reconcileCommitMetadata(HoodieTable table, String commitActionType, String instantTime, HoodieCommitMetadata originalMetadata) {
+    return originalMetadata;
   }
 
   protected void commit(HoodieTable table, String commitActionType, String instantTime, HoodieCommitMetadata metadata,
                         List<HoodieWriteStat> stats, HoodieData<WriteStatus> writeStatuses) throws IOException {
     LOG.info("Committing " + instantTime + " action " + commitActionType);
     HoodieActiveTimeline activeTimeline = table.getActiveTimeline();
+    HoodieCommitMetadata reconciledCommitMetadata = reconcileCommitMetadata(table, commitActionType, instantTime, metadata);
     // Finalize write
     finalizeWrite(table, instantTime, stats);
     // do save internal schema to support Implicitly add columns in write process
-    if (!metadata.getExtraMetadata().containsKey(SerDeHelper.LATEST_SCHEMA)
-        && metadata.getExtraMetadata().containsKey(SCHEMA_KEY) && table.getConfig().getSchemaEvolutionEnable()) {
-      saveInternalSchema(table, instantTime, metadata);
+    if (!reconciledCommitMetadata.getExtraMetadata().containsKey(SerDeHelper.LATEST_SCHEMA)
+        && reconciledCommitMetadata.getExtraMetadata().containsKey(SCHEMA_KEY) && table.getConfig().getSchemaEvolutionEnable()) {
+      saveInternalSchema(table, instantTime, reconciledCommitMetadata);
     }
     // update Metadata table
-    writeTableMetadata(table, instantTime, commitActionType, metadata, writeStatuses);
+    writeTableMetadata(table, instantTime, reconciledCommitMetadata, writeStatuses);
     activeTimeline.saveAsComplete(new HoodieInstant(true, commitActionType, instantTime),
-        Option.of(metadata.toJsonString().getBytes(StandardCharsets.UTF_8)));
+        Option.of(reconciledCommitMetadata.toJsonString().getBytes(StandardCharsets.UTF_8)));
   }
 
   // Save internal schema
-  private void saveInternalSchema(HoodieTable table, String instantTime, HoodieCommitMetadata metadata) {
+  protected final void saveInternalSchema(HoodieTable table, String instantTime, HoodieCommitMetadata metadata) {
     TableSchemaResolver schemaUtil = new TableSchemaResolver(table.getMetaClient());
     String historySchemaStr = schemaUtil.getTableHistorySchemaStrFromCommitMetadata().orElse("");
     FileBasedInternalSchemaStorageManager schemasManager = new FileBasedInternalSchemaStorageManager(table.getMetaClient());
@@ -296,13 +304,13 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
       InternalSchema internalSchema;
       Schema avroSchema = HoodieAvroUtils.createHoodieWriteSchema(config.getSchema(), config.allowOperationMetadataField());
       if (historySchemaStr.isEmpty()) {
-        internalSchema = SerDeHelper.fromJson(config.getInternalSchema()).orElse(AvroInternalSchemaConverter.convert(avroSchema));
+        internalSchema = SerDeHelper.fromJson(config.getInternalSchema()).orElseGet(() -> AvroInternalSchemaConverter.convert(avroSchema));
         internalSchema.setSchemaId(Long.parseLong(instantTime));
       } else {
         internalSchema = InternalSchemaUtils.searchSchema(Long.parseLong(instantTime),
             SerDeHelper.parseSchemas(historySchemaStr));
       }
-      InternalSchema evolvedSchema = AvroSchemaEvolutionUtils.reconcileSchema(avroSchema, internalSchema);
+      InternalSchema evolvedSchema = AvroSchemaEvolutionUtils.reconcileSchema(avroSchema, internalSchema, config.getBooleanOrDefault(HoodieCommonConfig.SET_NULL_FOR_MISSING_COLUMNS));
       if (evolvedSchema.equals(internalSchema)) {
         metadata.addMetadata(SerDeHelper.LATEST_SCHEMA, SerDeHelper.toJson(evolvedSchema));
         //TODO save history schema by metaTable
@@ -351,25 +359,20 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
    *
    * @param table         {@link HoodieTable} of interest.
    * @param instantTime   instant time of the commit.
-   * @param actionType    action type of the commit.
    * @param metadata      instance of {@link HoodieCommitMetadata}.
    * @param writeStatuses WriteStatuses for the completed action.
    */
-  protected void writeTableMetadata(HoodieTable table, String instantTime, String actionType, HoodieCommitMetadata metadata, HoodieData<WriteStatus> writeStatuses) {
-    if (table.isTableServiceAction(actionType, instantTime)) {
-      tableServiceClient.writeTableMetadata(table, instantTime, actionType, metadata, writeStatuses);
-    } else {
-      context.setJobStatus(this.getClass().getSimpleName(), "Committing to metadata table: " + config.getTableName());
-      Option<HoodieTableMetadataWriter> metadataWriterOpt = table.getMetadataWriter(instantTime);
-      if (metadataWriterOpt.isPresent()) {
-        try (HoodieTableMetadataWriter metadataWriter = metadataWriterOpt.get()) {
-          metadataWriter.update(metadata, writeStatuses, instantTime);
-        } catch (Exception e) {
-          if (e instanceof HoodieException) {
-            throw (HoodieException) e;
-          } else {
-            throw new HoodieException("Failed to update metadata", e);
-          }
+  protected void writeTableMetadata(HoodieTable table, String instantTime, HoodieCommitMetadata metadata, HoodieData<WriteStatus> writeStatuses) {
+    context.setJobStatus(this.getClass().getSimpleName(), "Committing to metadata table: " + config.getTableName());
+    Option<HoodieTableMetadataWriter> metadataWriterOpt = table.getMetadataWriter(instantTime);
+    if (metadataWriterOpt.isPresent()) {
+      try (HoodieTableMetadataWriter metadataWriter = metadataWriterOpt.get()) {
+        metadataWriter.updateFromWriteStatuses(metadata, writeStatuses, instantTime);
+      } catch (Exception e) {
+        if (e instanceof HoodieException) {
+          throw (HoodieException) e;
+        } else {
+          throw new HoodieException("Failed to update metadata", e);
         }
       }
     }
@@ -537,9 +540,6 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
    * @return Write Status
    */
   public O postWrite(HoodieWriteMetadata<O> result, String instantTime, HoodieTable hoodieTable) {
-    if (result.getIndexLookupDuration().isPresent()) {
-      metrics.updateIndexMetrics(getOperationType().name(), result.getIndexUpdateDuration().get().toMillis());
-    }
     if (result.isCommitted()) {
       // Perform post commit operations.
       if (result.getFinalizeDuration().isPresent()) {
@@ -1208,6 +1208,12 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
     return tableServiceClient.cluster(clusteringInstant, shouldComplete);
   }
 
+  public boolean purgePendingClustering(String clusteringInstant) {
+    HoodieTable table = createTable(config, context.getHadoopConf().get());
+    preWrite(clusteringInstant, WriteOperationType.CLUSTER, table.getMetaClient());
+    return tableServiceClient.purgePendingClustering(clusteringInstant);
+  }
+
   /**
    * Schedule table services such as clustering, compaction & cleaning.
    *
@@ -1258,7 +1264,7 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
     this.txnManager.beginTransaction(ownerInstant, Option.empty());
     try {
       tryUpgrade(metaClient, instantTime);
-      initMetadataTable(instantTime);
+      initMetadataTable(instantTime, metaClient);
     } finally {
       this.txnManager.endTransaction(ownerInstant);
     }
@@ -1269,7 +1275,7 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
    *
    * @param instantTime current inflight instant time
    */
-  protected void initMetadataTable(Option<String> instantTime) {
+  protected void initMetadataTable(Option<String> instantTime, HoodieTableMetaClient metaClient) {
     // by default do nothing.
   }
 
@@ -1313,7 +1319,7 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
       case BULK_INSERT_PREPPED:
       case INSERT_OVERWRITE:
       case INSERT_OVERWRITE_TABLE:
-        setWriteTimer(table);
+        setWriteTimer(table.getMetaClient().getCommitActionType());
         break;
       case CLUSTER:
       case COMPACT:
@@ -1370,8 +1376,7 @@ public abstract class BaseHoodieWriteClient<T, I, K, O> extends BaseHoodieClient
     this.tableServiceClient.close();
   }
 
-  private void setWriteTimer(HoodieTable table) {
-    String commitType = table.getMetaClient().getCommitActionType();
+  public void setWriteTimer(String commitType) {
     if (commitType.equals(HoodieTimeline.COMMIT_ACTION)) {
       writeTimer = metrics.getCommitCtx();
     } else if (commitType.equals(HoodieTimeline.DELTA_COMMIT_ACTION)) {

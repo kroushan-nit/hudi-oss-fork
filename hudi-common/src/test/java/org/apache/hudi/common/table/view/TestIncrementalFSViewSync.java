@@ -627,7 +627,7 @@ public class TestIncrementalFSViewSync extends HoodieCommonTestHarness {
 
     HoodieInstant cleanInflightInstant = new HoodieInstant(true, HoodieTimeline.CLEAN_ACTION, cleanInstant);
     metaClient.getActiveTimeline().createNewInstant(cleanInflightInstant);
-    HoodieCleanMetadata cleanMetadata = CleanerUtils.convertCleanMetadata(cleanInstant, Option.empty(), cleanStats);
+    HoodieCleanMetadata cleanMetadata = CleanerUtils.convertCleanMetadata(cleanInstant, Option.empty(), cleanStats, Collections.EMPTY_MAP);
     metaClient.getActiveTimeline().saveAsComplete(cleanInflightInstant,
         TimelineMetadataUtils.serializeCleanMetadata(cleanMetadata));
   }
@@ -643,7 +643,7 @@ public class TestIncrementalFSViewSync extends HoodieCommonTestHarness {
       boolean isRestore) throws IOException {
     Map<String, List<String>> partitionToFiles = deleteFiles(files);
     List<HoodieRollbackStat> rollbackStats = partitionToFiles.entrySet().stream().map(e ->
-        new HoodieRollbackStat(e.getKey(), e.getValue(), new ArrayList<>(), new HashMap<>())
+        new HoodieRollbackStat(e.getKey(), e.getValue(), new ArrayList<>(), new HashMap<>(), new HashMap<>())
     ).collect(Collectors.toList());
 
     List<HoodieInstant> rollbacks = new ArrayList<>();

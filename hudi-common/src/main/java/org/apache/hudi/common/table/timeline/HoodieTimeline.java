@@ -396,6 +396,27 @@ public interface HoodieTimeline extends Serializable {
   Option<HoodieInstant> getFirstNonSavepointCommit();
 
   /**
+   * get the most recent cluster commit if present
+   */
+  Option<HoodieInstant> getLastClusteringInstant();
+
+  /**
+   * get the most recent pending cluster commit if present
+   *
+   */
+  Option<HoodieInstant> getLastPendingClusterCommit();
+
+  /**
+   * get the least recent pending cluster commit if present
+   */
+  public Option<HoodieInstant> getFirstPendingClusterInstant();
+
+  /**
+   * return true if instant is a pending clustering commit, otherwise false
+   */
+  public boolean isPendingClusterInstant(String instantTime);
+
+  /**
    * Read the completed instant details.
    */
   Option<byte[]> getInstantDetails(HoodieInstant instant);
@@ -413,6 +434,15 @@ public interface HoodieTimeline extends Serializable {
 
   static boolean compareTimestamps(String commit1, BiPredicate<String, String> predicateToApply, String commit2) {
     return predicateToApply.test(commit1, commit2);
+  }
+
+  static String minTimestamp(String commit1, String commit2) {
+    if (StringUtils.isNullOrEmpty(commit1)) {
+      return commit2;
+    } else if (StringUtils.isNullOrEmpty(commit2)) {
+      return commit1;
+    }
+    return GREATER_THAN.test(commit1, commit2) ? commit2 : commit1;
   }
 
   /**

@@ -47,6 +47,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.avro.HoodieAvroUtils.unwrapAvroValueWrapper;
@@ -66,16 +67,23 @@ public class HoodieDeleteBlock extends HoodieLogBlock {
       Lazy.lazily(HoodieDeleteRecord::newBuilder);
 
   private DeleteRecord[] recordsToDelete;
+  private int logBlockVersionToWrite;
 
   public HoodieDeleteBlock(DeleteRecord[] recordsToDelete, Map<HeaderMetadataType, String> header) {
-    this(Option.empty(), null, false, Option.empty(), header, new HashMap<>());
-    this.recordsToDelete = recordsToDelete;
+    this(recordsToDelete, header, HoodieLogBlock.version);
   }
 
-  public HoodieDeleteBlock(Option<byte[]> content, FSDataInputStream inputStream, boolean readBlockLazily,
+  public HoodieDeleteBlock(DeleteRecord[] recordsToDelete, Map<HeaderMetadataType, String> header, int logBlockVersionToWrite) {
+    this(Option.empty(), null, false, Option.empty(), header, new HashMap<>());
+    this.recordsToDelete = recordsToDelete;
+    this.logBlockVersionToWrite = logBlockVersionToWrite;
+  }
+
+  public HoodieDeleteBlock(Option<byte[]> content, Supplier<FSDataInputStream> inputStreamSupplier, boolean readBlockLazily,
                            Option<HoodieLogBlockContentLocation> blockContentLocation, Map<HeaderMetadataType, String> header,
                            Map<HeaderMetadataType, String> footer) {
-    super(header, footer, blockContentLocation, content, inputStream, readBlockLazily);
+    super(header, footer, blockContentLocation, content, inputStreamSupplier, readBlockLazily);
+    this.logBlockVersionToWrite = HoodieLogBlock.version;
   }
 
   @Override
@@ -92,8 +100,8 @@ public class HoodieDeleteBlock extends HoodieLogBlock {
 
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     DataOutputStream output = new DataOutputStream(baos);
-    output.writeInt(version);
-    byte[] bytesToWrite = (version <= 2) ? serializeV2() : serializeV3();
+    output.writeInt(logBlockVersionToWrite);
+    byte[] bytesToWrite = (logBlockVersionToWrite <= 2) ? serializeV2() : serializeV3();
     output.writeInt(bytesToWrite.length);
     output.write(bytesToWrite);
     return baos.toByteArray();

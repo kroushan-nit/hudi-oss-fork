@@ -48,6 +48,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -72,7 +74,6 @@ import static org.apache.hudi.common.util.ValidationUtils.checkArgument;
 import static org.apache.hudi.common.util.ValidationUtils.checkState;
 import static org.apache.hudi.hadoop.CachingPath.createRelativePathUnsafe;
 import static org.apache.hudi.metadata.HoodieTableMetadata.RECORDKEY_PARTITION_LIST;
-import static org.apache.hudi.metadata.HoodieTableMetadataUtil.getPartitionIdentifier;
 
 /**
  * MetadataTable records are persisted with the schema defined in HoodieMetadata.avsc.
@@ -99,7 +100,7 @@ import static org.apache.hudi.metadata.HoodieTableMetadataUtil.getPartitionIdent
  * During compaction on the table, the deletions are merged with additions and hence records are pruned.
  */
 public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadataPayload> {
-
+  private static final Logger LOG = LoggerFactory.getLogger(HoodieMetadataPayload.class);
   /**
    * Type of the record. This can be an enum in the schema but Avro1.8
    * has a bug - https://issues.apache.org/jira/browse/AVRO-1810
@@ -158,7 +159,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   /**
    * FileIndex value saved in record index record when the fileId has no index (old format of base filename)
    */
-  private static final int RECORD_INDEX_MISSING_FILEINDEX_FALLBACK = -1;
+  public static final int RECORD_INDEX_MISSING_FILEINDEX_FALLBACK = -1;
 
   /**
    * NOTE: PLEASE READ CAREFULLY
@@ -310,7 +311,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
    */
   public static HoodieRecord<HoodieMetadataPayload> createPartitionListRecord(List<String> partitions, boolean isDeleted) {
     Map<String, HoodieMetadataFileInfo> fileInfo = new HashMap<>();
-    partitions.forEach(partition -> fileInfo.put(getPartitionIdentifier(partition), new HoodieMetadataFileInfo(0L, isDeleted)));
+    partitions.forEach(partition -> fileInfo.put(HoodieTableMetadataUtil.getPartitionIdentifierForFilesPartition(partition), new HoodieMetadataFileInfo(0L, isDeleted)));
 
     HoodieKey key = new HoodieKey(RECORDKEY_PARTITION_LIST, MetadataPartitionType.FILES.getPartitionPath());
     HoodieMetadataPayload payload = new HoodieMetadataPayload(key.getRecordKey(), METADATA_TYPE_PARTITION_LIST,
@@ -328,6 +329,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
   public static HoodieRecord<HoodieMetadataPayload> createPartitionFilesRecord(String partition,
                                                                                Map<String, Long> filesAdded,
                                                                                List<String> filesDeleted) {
+    String partitionIdentifier = HoodieTableMetadataUtil.getPartitionIdentifierForFilesPartition(partition);
     int size = filesAdded.size() + filesDeleted.size();
     Map<String, HoodieMetadataFileInfo> fileInfo = new HashMap<>(size, 1);
     filesAdded.forEach((fileName, fileSize) -> {
@@ -339,7 +341,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
 
     filesDeleted.forEach(fileName -> fileInfo.put(fileName, DELETE_FILE_METADATA));
 
-    HoodieKey key = new HoodieKey(partition, MetadataPartitionType.FILES.getPartitionPath());
+    HoodieKey key = new HoodieKey(partitionIdentifier, MetadataPartitionType.FILES.getPartitionPath());
     HoodieMetadataPayload payload = new HoodieMetadataPayload(key.getRecordKey(), METADATA_TYPE_FILE_LIST, fileInfo);
     return new HoodieAvroRecord<>(key, payload);
   }
@@ -363,8 +365,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
     checkArgument(!baseFileName.contains(Path.SEPARATOR)
             && FSUtils.isBaseFile(new Path(baseFileName)),
         "Invalid base file '" + baseFileName + "' for MetaIndexBloomFilter!");
-    final String bloomFilterIndexKey = new PartitionIndexID(partitionName).asBase64EncodedString()
-        .concat(new FileIndexID(baseFileName).asBase64EncodedString());
+    final String bloomFilterIndexKey = getBloomFilterRecordKey(partitionName, baseFileName);
     HoodieKey key = new HoodieKey(bloomFilterIndexKey, MetadataPartitionType.BLOOM_FILTERS.getPartitionPath());
 
     HoodieMetadataBloomFilter metadataBloomFilter =
@@ -411,6 +412,11 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
       default:
         throw new HoodieMetadataException("Unknown type of HoodieMetadataPayload: " + type);
     }
+  }
+
+  private static String getBloomFilterRecordKey(String partitionName, String fileName) {
+    return new PartitionIndexID(HoodieTableMetadataUtil.getBloomFilterIndexPartitionIdentifier(partitionName)).asBase64EncodedString()
+        .concat(new FileIndexID(fileName).asBase64EncodedString());
   }
 
   private HoodieMetadataBloomFilter combineBloomFilterMetadata(HoodieMetadataPayload previousRecord) {
@@ -550,27 +556,34 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
             //          - First we merge records from all of the delta log-files
             //          - Then we merge records from base-files with the delta ones (coming as a result
             //          of the previous step)
-            (oldFileInfo, newFileInfo) ->
-                // NOTE: We can’t assume that MT update records will be ordered the same way as actual
-                //       FS operations (since they are not atomic), therefore MT record merging should be a
-                //       _commutative_ & _associative_ operation (ie one that would work even in case records
-                //       will get re-ordered), which is
-                //          - Possible for file-sizes (since file-sizes will ever grow, we can simply
-                //          take max of the old and new records)
-                //          - Not possible for is-deleted flags*
-                //
-                //       *However, we’re assuming that the case of concurrent write and deletion of the same
-                //       file is _impossible_ -- it would only be possible with concurrent upsert and
-                //       rollback operation (affecting the same log-file), which is implausible, b/c either
-                //       of the following have to be true:
-                //          - We’re appending to failed log-file (then the other writer is trying to
-                //          rollback it concurrently, before it’s own write)
-                //          - Rollback (of completed instant) is running concurrently with append (meaning
-                //          that restore is running concurrently with a write, which is also nut supported
-                //          currently)
-                newFileInfo.getIsDeleted()
-                    ? null
-                    : new HoodieMetadataFileInfo(Math.max(newFileInfo.getSize(), oldFileInfo.getSize()), false));
+            (oldFileInfo, newFileInfo) -> {
+              // NOTE: We can’t assume that MT update records will be ordered the same way as actual
+              //       FS operations (since they are not atomic), therefore MT record merging should be a
+              //       _commutative_ & _associative_ operation (ie one that would work even in case records
+              //       will get re-ordered), which is
+              //          - Possible for file-sizes (since file-sizes will ever grow, we can simply
+              //          take max of the old and new records)
+              //          - Not possible for is-deleted flags*
+              //
+              //       *However, we’re assuming that the case of concurrent write and deletion of the same
+              //       file is _impossible_ -- it would only be possible with concurrent upsert and
+              //       rollback operation (affecting the same log-file), which is implausible, b/c either
+              //       of the following have to be true:
+              //          - We’re appending to failed log-file (then the other writer is trying to
+              //          rollback it concurrently, before it’s own write)
+              //          - Rollback (of completed instant) is running concurrently with append (meaning
+              //          that restore is running concurrently with a write, which is also nut supported
+              //          currently)
+              if (newFileInfo.getIsDeleted()) {
+                if (oldFileInfo.getIsDeleted()) {
+                  LOG.warn("A file is repeatedly deleted in the files partition of the metadata table: " + key);
+                  return newFileInfo;
+                }
+                return null;
+              }
+              return new HoodieMetadataFileInfo(
+                  Math.max(newFileInfo.getSize(), oldFileInfo.getSize()), false);
+            });
       });
     }
 
@@ -611,7 +624,8 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
    * @return Column stats index key
    */
   public static String getColumnStatsIndexKey(String partitionName, HoodieColumnRangeMetadata<Comparable> columnRangeMetadata) {
-    final PartitionIndexID partitionIndexID = new PartitionIndexID(partitionName);
+
+    final PartitionIndexID partitionIndexID = new PartitionIndexID(HoodieTableMetadataUtil.getColumnStatsIndexPartitionIdentifier(partitionName));
     final FileIndexID fileIndexID = new FileIndexID(new Path(columnRangeMetadata.getFilePath()).getName());
     final ColumnIndexID columnIndexID = new ColumnIndexID(columnRangeMetadata.getColumnName());
     return getColumnStatsIndexKey(partitionIndexID, fileIndexID, columnIndexID);
@@ -761,22 +775,7 @@ public class HoodieMetadataPayload implements HoodieRecordPayload<HoodieMetadata
    * If this is a record-level index entry, returns the file to which this is mapped.
    */
   public HoodieRecordGlobalLocation getRecordGlobalLocation() {
-    final String partition = recordIndexMetadata.getPartitionName();
-    String fileId = null;
-    if (recordIndexMetadata.getFileIdEncoding() == 0) {
-      // encoding 0 refers to UUID based fileID
-      final UUID uuid = new UUID(recordIndexMetadata.getFileIdHighBits(), recordIndexMetadata.getFileIdLowBits());
-      fileId = uuid.toString();
-      if (recordIndexMetadata.getFileIndex() != RECORD_INDEX_MISSING_FILEINDEX_FALLBACK) {
-        fileId += "-" + recordIndexMetadata.getFileIndex();
-      }
-    } else {
-      // encoding 1 refers to no encoding. fileID as is.
-      fileId = recordIndexMetadata.getFileId();
-    }
-
-    final java.util.Date instantDate = new java.util.Date(recordIndexMetadata.getInstantTime());
-    return new HoodieRecordGlobalLocation(partition, HoodieActiveTimeline.formatDate(instantDate), fileId);
+    return HoodieTableMetadataUtil.getLocationFromRecordIndexInfo(recordIndexMetadata);
   }
 
   public boolean isDeleted() {

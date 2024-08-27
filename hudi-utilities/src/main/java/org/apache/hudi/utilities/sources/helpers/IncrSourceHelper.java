@@ -40,6 +40,7 @@ import org.apache.spark.storage.StorageLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Objects;
 import java.util.function.Function;
 
 import static org.apache.hudi.DataSourceReadOptions.INCREMENTAL_READ_HANDLE_HOLLOW_COMMIT;
@@ -130,11 +131,20 @@ public class IncrSourceHelper {
       }
     });
 
-    String previousInstantTime = beginInstantTime;
+    // When `beginInstantTime` is present, `previousInstantTime` is set to the completed commit before `beginInstantTime` if that exists.
+    // If there is no completed commit before `beginInstantTime`, e.g., `beginInstantTime` is the first commit in the active timeline,
+    // `previousInstantTime` is set to `DEFAULT_BEGIN_TIMESTAMP`.
+    String previousInstantTime = DEFAULT_BEGIN_TIMESTAMP;
     if (!beginInstantTime.equals(DEFAULT_BEGIN_TIMESTAMP)) {
       Option<HoodieInstant> previousInstant = activeCommitTimeline.findInstantBefore(beginInstantTime);
       if (previousInstant.isPresent()) {
         previousInstantTime = previousInstant.get().getTimestamp();
+      } else {
+        // if begin instant time matches first entry in active timeline, we can set previous = beginInstantTime - 1
+        if (activeCommitTimeline.filterCompletedInstants().firstInstant().isPresent()
+            && activeCommitTimeline.filterCompletedInstants().firstInstant().get().getTimestamp().equals(beginInstantTime)) {
+          previousInstantTime = String.valueOf(Long.parseLong(beginInstantTime) - 1);
+        }
       }
     }
 
@@ -170,12 +180,12 @@ public class IncrSourceHelper {
    * @param queryInfo   Query Info
    * @return end instants along with filtered rows.
    */
-  public static Pair<CloudObjectIncrCheckpoint, Dataset<Row>> filterAndGenerateCheckpointBasedOnSourceLimit(Dataset<Row> sourceData,
-                                                                                                            long sourceLimit, QueryInfo queryInfo,
-                                                                                                            CloudObjectIncrCheckpoint cloudObjectIncrCheckpoint) {
+  public static Pair<CloudObjectIncrCheckpoint, Option<Dataset<Row>>> filterAndGenerateCheckpointBasedOnSourceLimit(Dataset<Row> sourceData,
+                                                                                                                    long sourceLimit, QueryInfo queryInfo,
+                                                                                                                    CloudObjectIncrCheckpoint cloudObjectIncrCheckpoint) {
     if (sourceData.isEmpty()) {
-      LOG.info("Empty source, returning endpoint:" + queryInfo.getEndInstant());
-      return Pair.of(cloudObjectIncrCheckpoint, sourceData);
+      // There is no file matching the prefix.
+      return Pair.of(new CloudObjectIncrCheckpoint(queryInfo.getEndInstant(), null), Option.empty());
     }
     // Let's persist the dataset to avoid triggering the dag repeatedly
     sourceData.persist(StorageLevel.MEMORY_AND_DISK());
@@ -191,11 +201,18 @@ public class IncrSourceHelper {
           functions.concat(functions.col(queryInfo.getOrderColumn()), functions.col(queryInfo.getKeyColumn())));
       // Apply incremental filter
       orderedDf = orderedDf.filter(functions.col("commit_key").gt(concatenatedKey.get())).drop("commit_key");
-      // We could be just at the end of the commit, so return empty
+      // If there are no more files where commit_key is greater than lastCheckpointCommit#lastCheckpointKey
       if (orderedDf.isEmpty()) {
         LOG.info("Empty ordered source, returning endpoint:" + queryInfo.getEndInstant());
         sourceData.unpersist();
-        return Pair.of(new CloudObjectIncrCheckpoint(queryInfo.getEndInstant(), lastCheckpointKey.get()), orderedDf);
+        // queryInfo.getEndInstant() represents source table's last completed instant
+        // If current checkpoint is c1#abc and queryInfo.getEndInstant() is c1, return c1#abc.
+        // If current checkpoint is c1#abc and queryInfo.getEndInstant() is c2, return c2.
+        CloudObjectIncrCheckpoint updatedCheckpoint =
+            Objects.equals(queryInfo.getEndInstant(), cloudObjectIncrCheckpoint.getCommit())
+                ? cloudObjectIncrCheckpoint
+                : new CloudObjectIncrCheckpoint(queryInfo.getEndInstant(), null);
+        return Pair.of(updatedCheckpoint, Option.empty());
       }
     }
 
@@ -217,9 +234,9 @@ public class IncrSourceHelper {
       row = collectedRows.select(queryInfo.getOrderColumn(), queryInfo.getKeyColumn(), CUMULATIVE_COLUMN_NAME).orderBy(
           col(queryInfo.getOrderColumn()).desc(), col(queryInfo.getKeyColumn()).desc()).first();
     }
-    LOG.info("Processed batch size: " + row.getLong(2) + " bytes");
+    LOG.info("Processed batch size: " + row.get(row.fieldIndex(CUMULATIVE_COLUMN_NAME)) + " bytes");
     sourceData.unpersist();
-    return Pair.of(new CloudObjectIncrCheckpoint(row.getString(0), row.getString(1)), collectedRows);
+    return Pair.of(new CloudObjectIncrCheckpoint(row.getString(0), row.getString(1)), Option.of(collectedRows));
   }
 
   /**
@@ -241,6 +258,17 @@ public class IncrSourceHelper {
     }
 
     return null;
+  }
+
+  public static Dataset<Row> coalesceOrRepartition(Dataset dataset, int numPartitions) {
+    int existingNumPartitions = dataset.rdd().getNumPartitions();
+    LOG.info(String.format("existing number of partitions=%d, required number of partitions=%d", existingNumPartitions, numPartitions));
+    if (existingNumPartitions < numPartitions) {
+      dataset = dataset.repartition(numPartitions);
+    } else {
+      dataset = dataset.coalesce(numPartitions);
+    }
+    return dataset;
   }
 
   /**

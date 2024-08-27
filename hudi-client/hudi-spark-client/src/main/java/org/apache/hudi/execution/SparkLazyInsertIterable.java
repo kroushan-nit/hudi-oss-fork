@@ -34,8 +34,6 @@ import org.apache.hudi.util.ExecutorFactory;
 import java.util.Iterator;
 import java.util.List;
 
-import static org.apache.hudi.common.util.ValidationUtils.checkState;
-
 public class SparkLazyInsertIterable<T> extends HoodieLazyInsertIterable<T> {
 
   private final boolean useWriterSchema;
@@ -69,7 +67,8 @@ public class SparkLazyInsertIterable<T> extends HoodieLazyInsertIterable<T> {
     // Executor service used for launching writer thread.
     HoodieExecutor<List<WriteStatus>> bufferedIteratorExecutor = null;
     try {
-      Schema schema = new Schema.Parser().parse(hoodieConfig.getSchema());
+      // config.getSchema is not canonicalized, while config.getWriteSchema is canonicalized. So, we have to use the canonicalized schema to read the existing data.
+      Schema schema = new Schema.Parser().parse(hoodieConfig.getWriteSchema());
       if (useWriterSchema) {
         schema = HoodieAvroUtils.addMetadataFields(schema);
       }
@@ -78,7 +77,6 @@ public class SparkLazyInsertIterable<T> extends HoodieLazyInsertIterable<T> {
           getTransformer(schema, hoodieConfig), hoodieTable.getPreExecuteRunnable());
 
       final List<WriteStatus> result = bufferedIteratorExecutor.execute();
-      checkState(result != null && !result.isEmpty());
       return result;
     } catch (Exception e) {
       throw new HoodieException(e);

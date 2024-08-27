@@ -33,6 +33,7 @@ import org.apache.hudi.common.util.RocksDBSchemaHelper;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.common.util.collection.RocksDBDAO;
+import org.apache.hudi.metadata.HoodieTableMetadata;
 
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
@@ -71,18 +72,18 @@ public class RocksDbBasedFileSystemView extends IncrementalTimelineSyncFileSyste
 
   private boolean closed = false;
 
-  public RocksDbBasedFileSystemView(HoodieTableMetaClient metaClient, HoodieTimeline visibleActiveTimeline,
-      FileSystemViewStorageConfig config) {
-    super(config.isIncrementalTimelineSyncEnabled());
+  public RocksDbBasedFileSystemView(HoodieTableMetadata tableMetadata, HoodieTableMetaClient metaClient, HoodieTimeline visibleActiveTimeline,
+                                    FileSystemViewStorageConfig config) {
+    super(tableMetadata, config.isIncrementalTimelineSyncEnabled());
     this.config = config;
     this.schemaHelper = new RocksDBSchemaHelper(metaClient);
-    this.rocksDB = new RocksDBDAO(metaClient.getBasePath(), config.getRocksdbBasePath());
+    this.rocksDB = new RocksDBDAO(metaClient.getBasePath(), config.getRocksdbBasePath(), new HashMap<>());
     init(metaClient, visibleActiveTimeline);
   }
 
-  public RocksDbBasedFileSystemView(HoodieTableMetaClient metaClient, HoodieTimeline visibleActiveTimeline,
+  public RocksDbBasedFileSystemView(HoodieTableMetadata tableMetadata, HoodieTableMetaClient metaClient, HoodieTimeline visibleActiveTimeline,
       FileStatus[] fileStatuses, FileSystemViewStorageConfig config) {
-    this(metaClient, visibleActiveTimeline, config);
+    this(tableMetadata, metaClient, visibleActiveTimeline, config);
     addFilesToView(fileStatuses);
   }
 
@@ -533,6 +534,12 @@ public class RocksDbBasedFileSystemView extends IncrementalTimelineSyncFileSyste
     rocksDB.writeBatch(batch ->
         keysToDelete.forEach(key -> rocksDB.deleteInBatch(batch, schemaHelper.getColFamilyForReplacedFileGroups(), key))
     );
+  }
+
+  @Override
+  protected boolean hasReplacedFilesInPartition(String partitionPath) {
+    return rocksDB.<HoodieInstant>prefixSearch(schemaHelper.getColFamilyForReplacedFileGroups(), schemaHelper.getPrefixForReplacedFileGroup(partitionPath))
+        .findAny().isPresent();
   }
 
   @Override

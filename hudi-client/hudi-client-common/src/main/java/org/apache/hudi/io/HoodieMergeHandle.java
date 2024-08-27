@@ -36,6 +36,7 @@ import org.apache.hudi.common.util.DefaultSizeEstimator;
 import org.apache.hudi.common.util.HoodieRecordSizeEstimator;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ValidationUtils;
+import org.apache.hudi.common.serialization.DefaultSerializer;
 import org.apache.hudi.common.util.collection.ExternalSpillableMap;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -57,6 +58,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashSet;
@@ -104,7 +106,7 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
   protected Map<String, HoodieRecord<T>> keyToNewRecords;
   protected Set<String> writtenRecordKeys;
   protected HoodieFileWriter fileWriter;
-  private boolean preserveMetadata = false;
+  protected boolean preserveMetadata = false;
 
   protected Path newFilePath;
   protected Path oldFilePath;
@@ -112,7 +114,6 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
   protected long recordsDeleted = 0;
   protected long updatedRecordsWritten = 0;
   protected long insertRecordsWritten = 0;
-  protected boolean useWriterSchemaForCompaction;
   protected Option<BaseKeyGenerator> keyGeneratorOpt;
   private HoodieBaseFile baseFileToMerge;
 
@@ -143,7 +144,6 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
                            HoodieBaseFile dataFileToBeMerged, TaskContextSupplier taskContextSupplier, Option<BaseKeyGenerator> keyGeneratorOpt) {
     super(config, instantTime, partitionPath, fileId, hoodieTable, taskContextSupplier);
     this.keyToNewRecords = keyToNewRecords;
-    this.useWriterSchemaForCompaction = true;
     // preserveMetadata is disabled by default for MDT but enabled otherwise
     this.preserveMetadata = !HoodieTableMetadata.isMetadataTable(config.getBasePath());
     init(fileId, this.partitionPath, dataFileToBeMerged);
@@ -228,6 +228,7 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
       this.keyToNewRecords = new ExternalSpillableMap<>(memoryForMerge, config.getSpillableMapBasePath(),
           new DefaultSizeEstimator(), new HoodieRecordSizeEstimator(writeSchema),
           config.getCommonConfig().getSpillableDiskMapType(),
+          new DefaultSerializer<>(),
           config.getCommonConfig().isBitCaskDiskMapCompressionEnabled());
     } catch (IOException io) {
       throw new HoodieIOException("Cannot instantiate an ExternalSpillableMap", io);
@@ -281,7 +282,7 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
   }
 
   protected void writeInsertRecord(HoodieRecord<T> newRecord) throws IOException {
-    Schema schema = useWriterSchemaForCompaction ? writeSchemaWithMetaFields : writeSchema;
+    Schema schema = preserveMetadata ? writeSchemaWithMetaFields : writeSchema;
     // just skip the ignored record
     if (newRecord.shouldIgnore(schema, config.getProps())) {
       return;
@@ -310,7 +311,7 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
     }
     try {
       if (combineRecord.isPresent() && !combineRecord.get().isDelete(schema, config.getProps()) && !isDelete) {
-        writeToFile(newRecord.getKey(), combineRecord.get(), schema, prop, preserveMetadata && useWriterSchemaForCompaction);
+        writeToFile(newRecord.getKey(), combineRecord.get(), schema, prop, preserveMetadata);
         recordsWritten++;
       } else {
         recordsDeleted++;
@@ -337,7 +338,7 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
    */
   public void write(HoodieRecord<T> oldRecord) {
     Schema oldSchema = config.populateMetaFields() ? writeSchemaWithMetaFields : writeSchema;
-    Schema newSchema = useWriterSchemaForCompaction ? writeSchemaWithMetaFields : writeSchema;
+    Schema newSchema = preserveMetadata ? writeSchemaWithMetaFields : writeSchema;
     boolean copyOldRecord = true;
     String key = oldRecord.getRecordKey(oldSchema, keyGeneratorOpt);
     TypedProperties props = config.getPayloadConfig().getProps();
@@ -386,8 +387,7 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
     // NOTE: `FILENAME_METADATA_FIELD` has to be rewritten to correctly point to the
     //       file holding this record even in cases when overall metadata is preserved
     MetadataValues metadataValues = new MetadataValues().setFileName(newFilePath.getName());
-    HoodieRecord populatedRecord =
-        record.prependMetaFields(schema, writeSchemaWithMetaFields, metadataValues, prop);
+    HoodieRecord populatedRecord = record.prependMetaFields(schema, writeSchemaWithMetaFields, metadataValues, prop);
 
     if (shouldPreserveRecordMetadata) {
       fileWriter.write(key.getRecordKey(), populatedRecord, writeSchemaWithMetaFields);
@@ -419,8 +419,8 @@ public class HoodieMergeHandle<T, I, K, O> extends HoodieWriteHandle<T, I, K, O>
       markClosed();
       writeIncomingRecords();
 
-      if (keyToNewRecords instanceof ExternalSpillableMap) {
-        ((ExternalSpillableMap) keyToNewRecords).close();
+      if (keyToNewRecords instanceof Closeable) {
+        ((Closeable) keyToNewRecords).close();
       }
 
       keyToNewRecords = null;

@@ -39,6 +39,7 @@ import org.apache.hudi.common.table.timeline.HoodieInstant.State;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.ClusteringUtils;
 import org.apache.hudi.common.util.CommitUtils;
+import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.StringUtils;
@@ -110,6 +111,10 @@ public abstract class BaseCommitActionExecutor<T, I, K, O, R>
   }
 
   public abstract HoodieWriteMetadata<O> execute(I inputRecords);
+
+  public HoodieWriteMetadata<O> execute(I inputRecords, Option<HoodieTimer> preWriteTimer) {
+    return this.execute(inputRecords);
+  }
 
   /**
    * Save the workload profile in an intermediate file (here re-using commit files) This is useful when performing
@@ -237,6 +242,7 @@ public abstract class BaseCommitActionExecutor<T, I, K, O, R>
       Iterator<HoodieRecord<T>> recordItr) throws IOException;
 
   protected HoodieWriteMetadata<HoodieData<WriteStatus>> executeClustering(HoodieClusteringPlan clusteringPlan) {
+    context.setJobStatus(this.getClass().getSimpleName(), "Clustering records for " + config.getTableName());
     HoodieInstant instant = HoodieTimeline.getReplaceCommitRequestedInstant(instantTime);
     // Mark instant as clustering inflight
     table.getActiveTimeline().transitionReplaceRequestedToInflight(instant, Option.empty());
@@ -259,6 +265,7 @@ public abstract class BaseCommitActionExecutor<T, I, K, O, R>
     writeMetadata.setPartitionToReplaceFileIds(getPartitionToReplacedFileIds(clusteringPlan, writeMetadata));
     commitOnAutoCommit(writeMetadata);
     if (!writeMetadata.getCommitMetadata().isPresent()) {
+      LOG.info("Found empty commit metadata for clustering with instant time " + instantTime);
       HoodieCommitMetadata commitMetadata = CommitUtils.buildMetadata(writeMetadata.getWriteStats().get(), writeMetadata.getPartitionToReplaceFileIds(),
           extraMetadata, operationType, getSchemaToStoreInCommit(), getCommitActionType());
       writeMetadata.setCommitMetadata(Option.of(commitMetadata));

@@ -149,6 +149,7 @@ public class HoodieBloomIndex extends HoodieIndex<Object, Object> {
       }
       // fallback to loading column ranges from files
       if (isNullOrEmpty(fileInfoList)) {
+        LOG.warn("fallback to loading column ranges from files");
         fileInfoList = loadColumnRangesFromFiles(affectedPartitionPathList, context, hoodieTable);
       }
     } else {
@@ -212,7 +213,7 @@ public class HoodieBloomIndex extends HoodieIndex<Object, Object> {
     // also obtain file ranges, if range pruning is enabled
     context.setJobStatus(this.getClass().getName(), "Load meta index key ranges for file slices: " + config.getTableName());
 
-    String keyField = hoodieTable.getMetaClient().getTableConfig().getRecordKeyFieldProp();
+    String keyField = HoodieRecord.HoodieMetadataField.RECORD_KEY_METADATA_FIELD.getFieldName();
 
     List<Pair<String, HoodieBaseFile>> baseFilesForAllPartitions = HoodieIndexUtils.getLatestBaseFilesForAllPartitions(partitions, context, hoodieTable);
     // Partition and file name pairs
@@ -287,6 +288,7 @@ public class HoodieBloomIndex extends HoodieIndex<Object, Object> {
   HoodiePairData<HoodieFileGroupId, String> explodeRecordsWithFileComparisons(
       final Map<String, List<BloomIndexFileInfo>> partitionToFileIndexInfo,
       HoodiePairData<String, String> partitionRecordKeyPairs) {
+    LOG.info("Instantiating index file filter ");
     IndexFileFilter indexFileFilter =
         config.useBloomIndexTreebasedFilter() ? new IntervalTreeBasedIndexFileFilter(partitionToFileIndexInfo)
             : new ListBasedIndexFileFilter(partitionToFileIndexInfo);

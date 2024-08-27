@@ -17,6 +17,7 @@
 
 package org.apache.hudi
 
+import org.apache.hudi.HoodieSparkUtils.injectSQLConf
 import org.apache.hudi.client.WriteStatus
 import org.apache.hudi.client.model.HoodieInternalRow
 import org.apache.hudi.common.config.TypedProperties
@@ -25,6 +26,7 @@ import org.apache.hudi.common.engine.TaskContextSupplier
 import org.apache.hudi.common.model.HoodieRecord
 import org.apache.hudi.common.util.ReflectionUtils
 import org.apache.hudi.config.HoodieWriteConfig
+import org.apache.hudi.data.HoodieJavaRDD
 import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.index.HoodieIndex.BucketIndexEngineType
 import org.apache.hudi.index.{HoodieIndex, SparkHoodieIndexFactory}
@@ -40,11 +42,12 @@ import org.apache.spark.sql.HoodieUnsafeUtils.getNumPartitions
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Alias, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.Project
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Dataset, HoodieUnsafeUtils, Row}
 import org.apache.spark.unsafe.types.UTF8String
 
-import scala.collection.JavaConverters.{asScalaBufferConverter, seqAsJavaListConverter}
+import scala.collection.JavaConverters.asScalaBufferConverter
 
 object HoodieDatasetBulkInsertHelper
   extends ParallelismHelper[DataFrame](toJavaSerializableFunctionUnchecked(df => getNumPartitions(df))) with Logging {
@@ -62,7 +65,6 @@ object HoodieDatasetBulkInsertHelper
   def prepareForBulkInsert(df: DataFrame,
                            config: HoodieWriteConfig,
                            partitioner: BulkInsertPartitioner[Dataset[Row]],
-                           shouldDropPartitionColumns: Boolean,
                            instantTime: String): Dataset[Row] = {
     val populateMetaFields = config.populateMetaFields()
     val schema = df.schema
@@ -82,7 +84,7 @@ object HoodieDatasetBulkInsertHelper
         "Key-generator class name is required")
 
       val prependedRdd: RDD[InternalRow] =
-        df.queryExecution.toRdd.mapPartitions { iter =>
+        injectSQLConf(df.queryExecution.toRdd.mapPartitions { iter =>
           val typedProps = new TypedProperties(config.getProps)
           if (autoGenerateRecordKeys) {
             typedProps.setProperty(KeyGenUtils.RECORD_KEY_GEN_PARTITION_ID_CONFIG, String.valueOf(TaskContext.getPartitionId()))
@@ -108,7 +110,7 @@ object HoodieDatasetBulkInsertHelper
             // TODO use mutable row, avoid re-allocating
             new HoodieInternalRow(commitTimestamp, commitSeqNo, recordKey, partitionPath, filename, row, false)
           }
-        }
+        }, SQLConf.get)
 
       val dedupedRdd = if (config.shouldCombineBeforeInsert) {
         dedupeRows(prependedRdd, updatedSchema, config.getPreCombineField, SparkHoodieIndexFactory.isGlobalIndex(config))
@@ -128,16 +130,10 @@ object HoodieDatasetBulkInsertHelper
       HoodieUnsafeUtils.createDataFrameFrom(df.sparkSession, prependedQuery)
     }
 
-    val trimmedDF = if (shouldDropPartitionColumns) {
-      dropPartitionColumns(updatedDF, config)
-    } else {
-      updatedDF
-    }
-
     val targetParallelism =
-      deduceShuffleParallelism(trimmedDF, config.getBulkInsertShuffleParallelism)
+      deduceShuffleParallelism(updatedDF, config.getBulkInsertShuffleParallelism)
 
-    partitioner.repartitionRecords(trimmedDF, targetParallelism)
+    partitioner.repartitionRecords(updatedDF, targetParallelism)
   }
 
   /**
@@ -151,7 +147,7 @@ object HoodieDatasetBulkInsertHelper
                  arePartitionRecordsSorted: Boolean,
                  shouldPreserveHoodieMetadata: Boolean): HoodieData[WriteStatus] = {
     val schema = dataset.schema
-    val writeStatuses = dataset.queryExecution.toRdd.mapPartitions(iter => {
+    HoodieJavaRDD.of(injectSQLConf(dataset.queryExecution.toRdd.mapPartitions(iter => {
       val taskContextSupplier: TaskContextSupplier = table.getTaskContextSupplier
       val taskPartitionId = taskContextSupplier.getPartitionIdSupplier.get
       val taskId = taskContextSupplier.getStageIdSupplier.get.toLong
@@ -196,8 +192,7 @@ object HoodieDatasetBulkInsertHelper
       }
 
       writer.getWriteStatuses.asScala.iterator
-    }).collect()
-    table.getContext.parallelize(writeStatuses.toList.asJava)
+    }), SQLConf.get).toJavaRDD())
   }
 
   private def dedupeRows(rdd: RDD[InternalRow], schema: StructType, preCombineFieldRef: String, isGlobalIndex: Boolean): RDD[InternalRow] = {
@@ -243,21 +238,17 @@ object HoodieDatasetBulkInsertHelper
     }
   }
 
-  private def dropPartitionColumns(df: DataFrame, config: HoodieWriteConfig): DataFrame = {
-    val partitionPathFields = getPartitionPathFields(config).toSet
-    val nestedPartitionPathFields = partitionPathFields.filter(f => f.contains('.'))
-    if (nestedPartitionPathFields.nonEmpty) {
-      logWarning(s"Can not drop nested partition path fields: $nestedPartitionPathFields")
-    }
-
-    val partitionPathCols = (partitionPathFields -- nestedPartitionPathFields).toSeq
-
-    df.drop(partitionPathCols: _*)
-  }
-
   private def getPartitionPathFields(config: HoodieWriteConfig): Seq[String] = {
     val keyGeneratorClassName = config.getString(HoodieWriteConfig.KEYGENERATOR_CLASS_NAME)
     val keyGenerator = ReflectionUtils.loadClass(keyGeneratorClassName, new TypedProperties(config.getProps)).asInstanceOf[BuiltinKeyGenerator]
     keyGenerator.getPartitionPathFields.asScala
   }
+
+   def getPartitionPathCols(config: HoodieWriteConfig): Seq[String] = {
+    val partitionPathFields = getPartitionPathFields(config).toSet
+    val nestedPartitionPathFields = partitionPathFields.filter(f => f.contains('.'))
+
+    return (partitionPathFields -- nestedPartitionPathFields).toSeq
+  }
+
 }

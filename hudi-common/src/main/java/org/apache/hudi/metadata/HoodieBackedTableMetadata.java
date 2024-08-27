@@ -55,6 +55,7 @@ import org.apache.hudi.util.Transient;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,6 +70,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.config.HoodieMetadataConfig.DEFAULT_METADATA_ENABLE_FULL_SCAN_LOG_FILES;
@@ -122,7 +124,7 @@ public class HoodieBackedTableMetadata extends BaseTableMetadata {
     } else if (this.metadataMetaClient == null) {
       try {
         this.metadataMetaClient = HoodieTableMetaClient.builder().setConf(getHadoopConf()).setBasePath(metadataBasePath).build();
-        this.metadataFileSystemView = getFileSystemView(metadataMetaClient);
+        this.metadataFileSystemView = getFileSystemView(engineContext, metadataMetaClient);
         this.metadataTableConfig = metadataMetaClient.getTableConfig();
       } catch (TableNotFoundException e) {
         LOG.warn("Metadata table was not found at path " + metadataBasePath);
@@ -375,7 +377,7 @@ public class HoodieBackedTableMetadata extends BaseTableMetadata {
         ? reader.getRecordsByKeysIterator(sortedKeys)
         : reader.getRecordsByKeyPrefixIterator(sortedKeys);
 
-    return toStream(records)
+    Map<String, HoodieRecord<HoodieMetadataPayload>> result = toStream(records)
         .map(record -> {
           GenericRecord data = (GenericRecord) record.getData();
           return Pair.of(
@@ -383,6 +385,8 @@ public class HoodieBackedTableMetadata extends BaseTableMetadata {
               composeRecord(data, partitionName));
         })
         .collect(Collectors.toMap(Pair::getKey, Pair::getValue));
+    records.close();
+    return result;
   }
 
   private HoodieRecord<HoodieMetadataPayload> composeRecord(GenericRecord avroRecord, String partitionName) {
@@ -520,6 +524,10 @@ public class HoodieBackedTableMetadata extends BaseTableMetadata {
   public void close() {
     closePartitionReaders();
     partitionFileSliceMap.clear();
+    if (this.metadataFileSystemView != null) {
+      this.metadataFileSystemView.close();
+      this.metadataFileSystemView = null;
+    }
   }
 
   /**
@@ -572,7 +580,7 @@ public class HoodieBackedTableMetadata extends BaseTableMetadata {
 
   public Map<String, String> stats() {
     Set<String> allMetadataPartitionPaths = Arrays.stream(MetadataPartitionType.values()).map(MetadataPartitionType::getPartitionPath).collect(Collectors.toSet());
-    return metrics.map(m -> m.getStats(true, metadataMetaClient, this, allMetadataPartitionPaths)).orElse(new HashMap<>());
+    return metrics.map(m -> m.getStats(true, metadataFileSystemView, this, allMetadataPartitionPaths)).orElseGet(HashMap::new);
   }
 
   @Override
@@ -603,7 +611,8 @@ public class HoodieBackedTableMetadata extends BaseTableMetadata {
     dataMetaClient.reloadActiveTimeline();
     if (metadataMetaClient != null) {
       metadataMetaClient.reloadActiveTimeline();
-      metadataFileSystemView = getFileSystemView(metadataMetaClient);
+      metadataFileSystemView.close();
+      metadataFileSystemView = getFileSystemView(engineContext, metadataMetaClient);
     }
     // the cached reader has max instant time restriction, they should be cleared
     // because the metadata timeline may have changed.
@@ -617,5 +626,20 @@ public class HoodieBackedTableMetadata extends BaseTableMetadata {
         k -> HoodieTableMetadataUtil.getPartitionLatestMergedFileSlices(metadataMetaClient,
             metadataFileSystemView, partition.getPartitionPath()));
     return partitionFileSliceMap.get(partition.getPartitionPath()).size();
+  }
+
+  @Override
+  public Map<Pair<String, Path>, FileStatus[]> listPartitions(List<Pair<String, Path>> partitionPathList) throws IOException {
+    Map<String, Pair<String, Path>> absoluteToPairMap = partitionPathList.stream()
+        .collect(Collectors.toMap(
+            pair -> pair.getRight().toString(),
+            Function.identity()
+        ));
+    return getAllFilesInPartitions(
+            partitionPathList.stream().map(pair -> pair.getRight().toString()).collect(Collectors.toList()))
+        .entrySet().stream().collect(Collectors.toMap(
+            entry -> absoluteToPairMap.get(entry.getKey()),
+            Map.Entry::getValue
+        ));
   }
 }

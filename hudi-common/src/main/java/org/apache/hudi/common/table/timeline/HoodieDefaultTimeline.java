@@ -19,6 +19,7 @@
 package org.apache.hudi.common.table.timeline;
 
 import org.apache.hudi.common.table.timeline.HoodieInstant.State;
+import org.apache.hudi.common.util.ClusteringUtils;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
@@ -52,6 +53,12 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
 
   protected transient Function<HoodieInstant, Option<byte[]>> details;
   private List<HoodieInstant> instants;
+  // for efficient #contains queries.
+  private transient volatile Set<String> instantTimeSet;
+  // for efficient #isPendingClusterInstant queries
+  private transient volatile Set<String> pendingReplaceClusteringInstants;
+  // for efficient #isBeforeTimelineStarts check.
+  private transient volatile Option<HoodieInstant> firstNonSavepointCommit;
   private String timelineHash;
 
   public HoodieDefaultTimeline(Stream<HoodieInstant> instants, Function<HoodieInstant, Option<byte[]>> details) {
@@ -423,14 +430,14 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   @Override
   public boolean containsInstant(String ts) {
     // Check for 0.10.0+ timestamps which have msec granularity
-    if (getInstantsAsStream().anyMatch(s -> s.getTimestamp().equals(ts))) {
+    if (getOrCreateInstantSet().contains(ts)) {
       return true;
     }
 
     // Check for older timestamp which have sec granularity and an extension of DEFAULT_MILLIS_EXT may have been added via Timeline operations
     if (ts.length() == HoodieInstantTimeGenerator.MILLIS_INSTANT_TIMESTAMP_FORMAT_LENGTH && ts.endsWith(HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT)) {
       final String actualOlderFormatTs = ts.substring(0, ts.length() - HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT.length());
-      return containsOrBeforeTimelineStarts(actualOlderFormatTs);
+      return containsInstant(actualOlderFormatTs);
     }
 
     return false;
@@ -474,22 +481,51 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   }
 
   public Option<HoodieInstant> getFirstNonSavepointCommit() {
-    Option<HoodieInstant> firstCommit = firstInstant();
-    Set<String> savepointTimestamps = getInstantsAsStream()
-        .filter(entry -> entry.getAction().equals(HoodieTimeline.SAVEPOINT_ACTION))
-        .map(HoodieInstant::getTimestamp)
-        .collect(Collectors.toSet());
-    Option<HoodieInstant> firstNonSavepointCommit = firstCommit;
-    if (!savepointTimestamps.isEmpty()) {
-      // There are chances that there could be holes in the timeline due to archival and savepoint interplay.
-      // So, the first non-savepoint commit is considered as beginning of the active timeline.
-      firstNonSavepointCommit = Option.fromJavaOptional(getInstantsAsStream()
-          .filter(entry -> !savepointTimestamps.contains(entry.getTimestamp()))
-          .findFirst());
+    if (this.firstNonSavepointCommit == null) {
+      synchronized (this) {
+        if (this.firstNonSavepointCommit == null) {
+          this.firstNonSavepointCommit = findFirstNonSavepointCommit(this.instants);
+        }
+      }
     }
-    return firstNonSavepointCommit;
+    return this.firstNonSavepointCommit;
   }
-  
+
+  @Override
+  public Option<HoodieInstant> getLastClusteringInstant() {
+    return Option.fromJavaOptional(getCommitsTimeline().filter(s -> s.getAction().equalsIgnoreCase(HoodieTimeline.REPLACE_COMMIT_ACTION))
+        .getReverseOrderedInstants()
+        .filter(i -> ClusteringUtils.isClusteringInstant(this, i))
+        .findFirst());
+  }
+
+  @Override
+  public Option<HoodieInstant> getFirstPendingClusterInstant() {
+    return getLastOrFirstPendingClusterInstant(false);
+  }
+
+  @Override
+  public Option<HoodieInstant> getLastPendingClusterCommit() {
+    return getLastOrFirstPendingClusterInstant(true);
+  }
+
+  private Option<HoodieInstant> getLastOrFirstPendingClusterInstant(boolean isLast) {
+    HoodieTimeline replaceTimeline = filterPendingReplaceTimeline();
+    Stream<HoodieInstant> replaceStream;
+    if (isLast) {
+      replaceStream = replaceTimeline.getReverseOrderedInstants();
+    } else {
+      replaceStream = replaceTimeline.getInstantsAsStream();
+    }
+    return  Option.fromJavaOptional(replaceStream
+        .filter(i -> ClusteringUtils.isClusteringInstant(this, i)).findFirst());
+  }
+
+  @Override
+  public boolean isPendingClusterInstant(String instantTime) {
+    return getOrCreatePendingClusteringInstantSet().contains(instantTime);
+  }
+
   @Override
   public Option<byte[]> getInstantDetails(HoodieInstant instant) {
     return details.apply(instant);
@@ -518,5 +554,55 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
       }
     };
     return new HoodieDefaultTimeline(instantStream, details);
+  }
+
+  private Set<String> getOrCreateInstantSet() {
+    if (this.instantTimeSet == null) {
+      synchronized (this) {
+        if (this.instantTimeSet == null) {
+          this.instantTimeSet = this.instants.stream().map(HoodieInstant::getTimestamp).collect(Collectors.toSet());
+        }
+      }
+    }
+    return this.instantTimeSet;
+  }
+
+  private Set<String> getOrCreatePendingClusteringInstantSet() {
+    if (this.pendingReplaceClusteringInstants == null) {
+      synchronized (this) {
+        if (this.pendingReplaceClusteringInstants == null) {
+          List<HoodieInstant> pendingReplaceInstants = getCommitsTimeline().filterPendingReplaceTimeline().getInstants();
+          // Validate that there are no instants with same timestamp
+          pendingReplaceInstants.stream().collect(Collectors.groupingBy(HoodieInstant::getTimestamp)).forEach((timestamp, instants) -> {
+            if (instants.size() > 1) {
+              throw new IllegalStateException("Multiple instants with same timestamp: " + timestamp + " instants: " + instants);
+            }
+          });
+          // Filter replace commits down to those that are due to clustering
+          this.pendingReplaceClusteringInstants = pendingReplaceInstants.stream()
+              .filter(instant -> ClusteringUtils.isClusteringInstant(this, instant))
+              .map(HoodieInstant::getTimestamp).collect(Collectors.toSet());
+        }
+      }
+    }
+    return this.pendingReplaceClusteringInstants;
+  }
+
+  /**
+   * Returns the first non savepoint commit on the timeline.
+   */
+  private static Option<HoodieInstant> findFirstNonSavepointCommit(List<HoodieInstant> instants) {
+    Set<String> savepointTimestamps = instants.stream()
+        .filter(entry -> entry.getAction().equals(HoodieTimeline.SAVEPOINT_ACTION))
+        .map(HoodieInstant::getTimestamp)
+        .collect(Collectors.toSet());
+    if (!savepointTimestamps.isEmpty()) {
+      // There are chances that there could be holes in the timeline due to archival and savepoint interplay.
+      // So, the first non-savepoint commit is considered as beginning of the active timeline.
+      return Option.fromJavaOptional(instants.stream()
+          .filter(entry -> !savepointTimestamps.contains(entry.getTimestamp()))
+          .findFirst());
+    }
+    return Option.fromJavaOptional(instants.stream().findFirst());
   }
 }

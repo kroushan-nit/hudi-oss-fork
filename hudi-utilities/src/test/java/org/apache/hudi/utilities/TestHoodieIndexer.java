@@ -39,6 +39,8 @@ import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.exception.HoodieMetadataException;
 import org.apache.hudi.metadata.HoodieBackedTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataUtil;
 import org.apache.hudi.metadata.MetadataPartitionType;
@@ -70,12 +72,14 @@ import static org.apache.hudi.metadata.HoodieTableMetadataUtil.metadataPartition
 import static org.apache.hudi.metadata.MetadataPartitionType.BLOOM_FILTERS;
 import static org.apache.hudi.metadata.MetadataPartitionType.COLUMN_STATS;
 import static org.apache.hudi.metadata.MetadataPartitionType.FILES;
+import static org.apache.hudi.metadata.MetadataPartitionType.RECORD_INDEX;
 import static org.apache.hudi.testutils.Assertions.assertNoWriteErrors;
 import static org.apache.hudi.utilities.HoodieIndexer.DROP_INDEX;
 import static org.apache.hudi.utilities.UtilHelpers.SCHEDULE;
 import static org.apache.hudi.utilities.UtilHelpers.SCHEDULE_AND_EXECUTE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implements SparkProvider {
@@ -139,7 +143,7 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     assertTrue(reload(metaClient).getTableConfig().getMetadataPartitions().contains(BLOOM_FILTERS.getPartitionPath()));
 
     // build indexer config which has only column_stats enabled (files and bloom filter is already enabled)
-    indexMetadataPartitionsAndAssert(COLUMN_STATS, Arrays.asList(new MetadataPartitionType[] {FILES, BLOOM_FILTERS}), Collections.emptyList(), tableName);
+    indexMetadataPartitionsAndAssert(COLUMN_STATS, Arrays.asList(new MetadataPartitionType[] {FILES, BLOOM_FILTERS}), Collections.emptyList(), tableName, "streamer-config/indexer.properties");
   }
 
   @Test
@@ -153,7 +157,25 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     assertFalse(reload(metaClient).getTableConfig().getMetadataPartitions().contains(FILES.getPartitionPath()));
 
     // build indexer config which has only files enabled
-    indexMetadataPartitionsAndAssert(FILES, Collections.emptyList(), Arrays.asList(new MetadataPartitionType[] {COLUMN_STATS, BLOOM_FILTERS}), tableName);
+    indexMetadataPartitionsAndAssert(FILES, Collections.emptyList(), Arrays.asList(new MetadataPartitionType[] {COLUMN_STATS, BLOOM_FILTERS}), tableName, "streamer-config/indexer.properties");
+  }
+
+  /**
+   * Upsert with metadata table (FILES partition) enabled and then run indexer for RECORD_INDEX.
+   */
+  @Test
+  public void testIndexerForRecordIndex() {
+    String tableName = "indexer_test";
+    // enable files and bloom_filters on the regular write client
+    HoodieMetadataConfig.Builder metadataConfigBuilder = getMetadataConfigBuilder(true, false);
+    upsertToTable(metadataConfigBuilder.build(), tableName);
+
+    // validate table config
+    assertTrue(reload(metaClient).getTableConfig().getMetadataPartitions().contains(FILES.getPartitionPath()));
+
+    // build indexer config which has only files enabled
+    indexMetadataPartitionsAndAssert(RECORD_INDEX, Collections.singletonList(FILES), Arrays.asList(new MetadataPartitionType[] {COLUMN_STATS, BLOOM_FILTERS}), tableName,
+        "streamer-config/indexer-record-index.properties");
   }
 
   @Test
@@ -174,7 +196,7 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
 
     // Run async indexer, creating a new indexing instant in the data table and a new delta commit
     // in the metadata table, with the suffix "004"
-    scheduleAndExecuteIndexing(COLUMN_STATS, tableName);
+    scheduleAndExecuteIndexing(COLUMN_STATS, tableName, "streamer-config/indexer.properties");
 
     HoodieInstant indexingInstant = metaClient.getActiveTimeline()
         .filter(i -> HoodieTimeline.INDEXING_ACTION.equals(i.getAction()))
@@ -270,7 +292,10 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     // start the indexer and validate files index is completely built out
     HoodieIndexer indexer = new HoodieIndexer(jsc(), config);
     // The catchup won't finish due to inflight delta commit, and this is expected
-    assertEquals(-1, indexer.start(0));
+    Throwable cause = assertThrows(RuntimeException.class, () ->  indexer.start(0))
+        .getCause();
+    assertTrue(cause instanceof HoodieMetadataException);
+    assertTrue(cause.getMessage().contains("Failed to index partition"));
 
     // Now, make sure that the inflight delta commit happened before the async indexer
     // is intact
@@ -311,15 +336,15 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     assertFalse(reload(metaClient).getTableConfig().getMetadataPartitions().contains(FILES.getPartitionPath()));
 
     // build indexer config which has only files enabled
-    indexMetadataPartitionsAndAssert(FILES, Collections.emptyList(), Arrays.asList(new MetadataPartitionType[] {COLUMN_STATS, BLOOM_FILTERS}), tableName);
+    indexMetadataPartitionsAndAssert(FILES, Collections.emptyList(), Arrays.asList(new MetadataPartitionType[] {COLUMN_STATS, BLOOM_FILTERS}), tableName, "streamer-config/indexer.properties");
 
     // build indexer config which has only col stats enabled
-    indexMetadataPartitionsAndAssert(COLUMN_STATS, Collections.singletonList(FILES), Arrays.asList(new MetadataPartitionType[] {BLOOM_FILTERS}), tableName);
+    indexMetadataPartitionsAndAssert(COLUMN_STATS, Collections.singletonList(FILES), Arrays.asList(new MetadataPartitionType[] {BLOOM_FILTERS}), tableName, "streamer-config/indexer.properties");
 
     HoodieTableMetaClient metadataMetaClient = HoodieTableMetaClient.builder().setConf(metaClient.getHadoopConf()).setBasePath(metaClient.getMetaPath() + "/metadata").build();
     List<FileSlice> partitionFileSlices =
         HoodieTableMetadataUtil.getPartitionLatestMergedFileSlices(
-            metadataMetaClient, getFileSystemView(metadataMetaClient), COLUMN_STATS.getPartitionPath());
+            metadataMetaClient, getFileSystemView(context(), metadataMetaClient), COLUMN_STATS.getPartitionPath());
     assertEquals(partitionFileSlices.size(), colStatsFileGroupCount);
   }
 
@@ -346,7 +371,10 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     config.propsFilePath = propsPath;
     // start the indexer and validate index building fails
     HoodieIndexer indexer = new HoodieIndexer(jsc(), config);
-    assertEquals(-1, indexer.start(0));
+    Throwable cause = assertThrows(RuntimeException.class, () ->  indexer.start(0))
+        .getCause();
+    assertTrue(cause instanceof HoodieException);
+    assertTrue(cause.getMessage().contains("Metadata table is not yet initialized"));
 
     // validate table config
     metaClient = reload(metaClient);
@@ -357,15 +385,15 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     assertFalse(metadataPartitionExists(basePath(), context(), FILES));
 
     // trigger FILES partition and indexing should succeed.
-    indexMetadataPartitionsAndAssert(FILES, Collections.emptyList(), Arrays.asList(new MetadataPartitionType[] {COLUMN_STATS, BLOOM_FILTERS}), tableName);
+    indexMetadataPartitionsAndAssert(FILES, Collections.emptyList(), Arrays.asList(new MetadataPartitionType[] {COLUMN_STATS, BLOOM_FILTERS}), tableName, "streamer-config/indexer.properties");
 
     // build indexer config which has only col stats enabled
-    indexMetadataPartitionsAndAssert(COLUMN_STATS, Collections.singletonList(FILES), Arrays.asList(new MetadataPartitionType[] {BLOOM_FILTERS}), tableName);
+    indexMetadataPartitionsAndAssert(COLUMN_STATS, Collections.singletonList(FILES), Arrays.asList(new MetadataPartitionType[] {BLOOM_FILTERS}), tableName, "streamer-config/indexer.properties");
 
     HoodieTableMetaClient metadataMetaClient = HoodieTableMetaClient.builder().setConf(metaClient.getHadoopConf()).setBasePath(metaClient.getMetaPath() + "/metadata").build();
     List<FileSlice> partitionFileSlices =
         HoodieTableMetadataUtil.getPartitionLatestMergedFileSlices(
-            metadataMetaClient, getFileSystemView(metadataMetaClient), COLUMN_STATS.getPartitionPath());
+            metadataMetaClient, getFileSystemView(context(), metadataMetaClient), COLUMN_STATS.getPartitionPath());
     assertEquals(partitionFileSlices.size(), HoodieMetadataConfig.METADATA_INDEX_COLUMN_STATS_FILE_GROUP_COUNT.defaultValue());
   }
 
@@ -373,18 +401,19 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     HoodieWriteConfig.Builder writeConfigBuilder = getWriteConfigBuilder(basePath(), tableName);
     HoodieWriteConfig writeConfig = writeConfigBuilder.withMetadataConfig(metadataConfig).build();
     // do one upsert with synchronous metadata update
-    SparkRDDWriteClient writeClient = new SparkRDDWriteClient(context(), writeConfig);
-    String instant = HoodieActiveTimeline.createNewInstantTime();
-    writeClient.startCommitWithTime(instant);
-    List<HoodieRecord> records = DATA_GENERATOR.generateInserts(instant, 100);
-    JavaRDD<WriteStatus> result = writeClient.upsert(jsc().parallelize(records, 1), instant);
-    List<WriteStatus> statuses = result.collect();
-    assertNoWriteErrors(statuses);
+    try (SparkRDDWriteClient writeClient = new SparkRDDWriteClient(context(), writeConfig)) {
+      String instant = HoodieActiveTimeline.createNewInstantTime();
+      writeClient.startCommitWithTime(instant);
+      List<HoodieRecord> records = DATA_GENERATOR.generateInserts(instant, 100);
+      JavaRDD<WriteStatus> result = writeClient.upsert(jsc().parallelize(records, 1), instant);
+      List<WriteStatus> statuses = result.collect();
+      assertNoWriteErrors(statuses);
+    }
   }
 
-  private void scheduleAndExecuteIndexing(MetadataPartitionType partitionTypeToIndex, String tableName) {
+  private void scheduleAndExecuteIndexing(MetadataPartitionType partitionTypeToIndex, String tableName, String propsFilePath) {
     HoodieIndexer.Config config = new HoodieIndexer.Config();
-    String propsPath = Objects.requireNonNull(getClass().getClassLoader().getResource("streamer-config/indexer.properties")).getPath();
+    String propsPath = Objects.requireNonNull(getClass().getClassLoader().getResource(propsFilePath)).getPath();
     config.basePath = basePath();
     config.tableName = tableName;
     config.indexTypes = partitionTypeToIndex.name();
@@ -402,8 +431,8 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
   }
 
   private void indexMetadataPartitionsAndAssert(MetadataPartitionType partitionTypeToIndex, List<MetadataPartitionType> alreadyCompletedPartitions, List<MetadataPartitionType> nonExistentPartitions,
-                                                String tableName) {
-    scheduleAndExecuteIndexing(partitionTypeToIndex, tableName);
+                                                String tableName, String propsFilePath) {
+    scheduleAndExecuteIndexing(partitionTypeToIndex, tableName, propsFilePath);
 
     // validate table config
     Set<String> completedPartitions = metaClient.getTableConfig().getMetadataPartitions();
@@ -424,13 +453,14 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     HoodieMetadataConfig.Builder metadataConfigBuilder = getMetadataConfigBuilder(true, false).withMetadataIndexBloomFilter(true);
     HoodieWriteConfig writeConfig = writeConfigBuilder.withMetadataConfig(metadataConfigBuilder.build()).build();
     // do one upsert with synchronous metadata update
-    SparkRDDWriteClient writeClient = new SparkRDDWriteClient(context(), writeConfig);
-    String instant = HoodieActiveTimeline.createNewInstantTime();
-    writeClient.startCommitWithTime(instant);
-    List<HoodieRecord> records = DATA_GENERATOR.generateInserts(instant, 100);
-    JavaRDD<WriteStatus> result = writeClient.upsert(jsc().parallelize(records, 1), instant);
-    List<WriteStatus> statuses = result.collect();
-    assertNoWriteErrors(statuses);
+    try (SparkRDDWriteClient writeClient = new SparkRDDWriteClient(context(), writeConfig)) {
+      String instant = HoodieActiveTimeline.createNewInstantTime();
+      writeClient.startCommitWithTime(instant);
+      List<HoodieRecord> records = DATA_GENERATOR.generateInserts(instant, 100);
+      JavaRDD<WriteStatus> result = writeClient.upsert(jsc().parallelize(records, 1), instant);
+      List<WriteStatus> statuses = result.collect();
+      assertNoWriteErrors(statuses);
+    }
 
     // validate partitions built successfully
     assertTrue(reload(metaClient).getTableConfig().getMetadataPartitions().contains(FILES.getPartitionPath()));
@@ -477,13 +507,14 @@ public class TestHoodieIndexer extends SparkClientFunctionalTestHarness implemen
     HoodieMetadataConfig.Builder metadataConfigBuilder = getMetadataConfigBuilder(true, false);
     HoodieWriteConfig writeConfig = writeConfigBuilder.withMetadataConfig(metadataConfigBuilder.build()).build();
     // do one upsert with synchronous metadata update
-    SparkRDDWriteClient writeClient = new SparkRDDWriteClient(context(), writeConfig);
-    String instant = HoodieActiveTimeline.createNewInstantTime();
-    writeClient.startCommitWithTime(instant);
-    List<HoodieRecord> records = DATA_GENERATOR.generateInserts(instant, 100);
-    JavaRDD<WriteStatus> result = writeClient.upsert(jsc().parallelize(records, 1), instant);
-    List<WriteStatus> statuses = result.collect();
-    assertNoWriteErrors(statuses);
+    try (SparkRDDWriteClient writeClient = new SparkRDDWriteClient(context(), writeConfig)) {
+      String instant = HoodieActiveTimeline.createNewInstantTime();
+      writeClient.startCommitWithTime(instant);
+      List<HoodieRecord> records = DATA_GENERATOR.generateInserts(instant, 100);
+      JavaRDD<WriteStatus> result = writeClient.upsert(jsc().parallelize(records, 1), instant);
+      List<WriteStatus> statuses = result.collect();
+      assertNoWriteErrors(statuses);
+    }
 
     // validate files partition built successfully
     assertTrue(reload(metaClient).getTableConfig().getMetadataPartitions().contains(FILES.getPartitionPath()));

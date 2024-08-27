@@ -24,16 +24,16 @@ import org.apache.hudi.common.function.SerializableFunctionUnchecked;
 import org.apache.hudi.common.model.HoodieRecordMerger;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.util.HoodieRecordUtils;
+import org.apache.hudi.common.util.HoodieTimer;
+import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieUpsertException;
 import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.table.HoodieTable;
-
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 
-import java.time.Duration;
-import java.time.Instant;
-
 public abstract class BaseWriteHelper<T, I, K, O, R> extends ParallelismHelper<I> {
+
+  protected HoodieTimer preWriteTimer = null; // time taken from dedup -> tag location -> building workload profile
 
   protected BaseWriteHelper(SerializableFunctionUnchecked<I, Integer> partitionNumberExtractor) {
     super(partitionNumberExtractor);
@@ -47,25 +47,31 @@ public abstract class BaseWriteHelper<T, I, K, O, R> extends ParallelismHelper<I
                                       int configuredShuffleParallelism,
                                       BaseCommitActionExecutor<T, I, K, O, R> executor,
                                       WriteOperationType operationType) {
-    try {
-      int targetParallelism =
-          deduceShuffleParallelism(inputRecords, configuredShuffleParallelism);
+    return this.write(instantTime, inputRecords, context, table, shouldCombine, configuredShuffleParallelism, executor, operationType, Option.empty());
+  }
 
+  public HoodieWriteMetadata<O> write(String instantTime,
+                                      I inputRecords,
+                                      HoodieEngineContext context,
+                                      HoodieTable<T, I, K, O> table,
+                                      boolean shouldCombine,
+                                      int configuredShuffleParallelism,
+                                      BaseCommitActionExecutor<T, I, K, O, R> executor,
+                                      WriteOperationType operationType,
+                                      Option<HoodieTimer> preWriteTimer) {
+    try {
       // De-dupe/merge if needed
       I dedupedRecords =
-          combineOnCondition(shouldCombine, inputRecords, targetParallelism, table);
+          combineOnCondition(shouldCombine, inputRecords, configuredShuffleParallelism, table);
 
-      Instant lookupBegin = Instant.now();
       I taggedRecords = dedupedRecords;
       if (table.getIndex().requiresTagging(operationType)) {
         // perform index loop up to get existing location of records
         context.setJobStatus(this.getClass().getSimpleName(), "Tagging: " + table.getConfig().getTableName());
         taggedRecords = tag(dedupedRecords, context, table);
       }
-      Duration indexLookupDuration = Duration.between(lookupBegin, Instant.now());
 
-      HoodieWriteMetadata<O> result = executor.execute(taggedRecords);
-      result.setIndexLookupDuration(indexLookupDuration);
+      HoodieWriteMetadata<O> result = executor.execute(taggedRecords, preWriteTimer);
       return result;
     } catch (Throwable e) {
       if (e instanceof HoodieUpsertException) {
@@ -79,8 +85,9 @@ public abstract class BaseWriteHelper<T, I, K, O, R> extends ParallelismHelper<I
       I dedupedRecords, HoodieEngineContext context, HoodieTable<T, I, K, O> table);
 
   public I combineOnCondition(
-      boolean condition, I records, int parallelism, HoodieTable<T, I, K, O> table) {
-    return condition ? deduplicateRecords(records, table, parallelism) : records;
+      boolean condition, I records, int configuredParallelism, HoodieTable<T, I, K, O> table) {
+    int targetParallelism = deduceShuffleParallelism(records, configuredParallelism);
+    return condition ? deduplicateRecords(records, table, targetParallelism) : records;
   }
 
   /**

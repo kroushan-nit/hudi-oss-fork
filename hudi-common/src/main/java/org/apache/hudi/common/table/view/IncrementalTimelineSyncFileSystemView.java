@@ -42,6 +42,7 @@ import org.apache.hudi.common.util.CompactionUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.metadata.HoodieTableMetadata;
 
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
@@ -67,7 +68,8 @@ public abstract class IncrementalTimelineSyncFileSystemView extends AbstractTabl
   // This is the visible active timeline used only for incremental view syncing
   private HoodieTimeline visibleActiveTimeline;
 
-  protected IncrementalTimelineSyncFileSystemView(boolean enableIncrementalTimelineSync) {
+  protected IncrementalTimelineSyncFileSystemView(HoodieTableMetadata tableMetadata, boolean enableIncrementalTimelineSync) {
+    super(tableMetadata);
     this.incrementalTimelineSyncEnabled = enableIncrementalTimelineSync;
   }
 
@@ -82,6 +84,7 @@ public abstract class IncrementalTimelineSyncFileSystemView extends AbstractTabl
     try {
       writeLock.lock();
       maySyncIncrementally();
+      tableMetadata.reset();
     } finally {
       writeLock.unlock();
     }
@@ -270,7 +273,7 @@ public abstract class IncrementalTimelineSyncFileSystemView extends AbstractTabl
           return status;
         }).toArray(FileStatus[]::new);
         List<HoodieFileGroup> fileGroups =
-            buildFileGroups(statuses, timeline.filterCompletedAndCompactionInstants(), false);
+            buildFileGroups(partition, statuses, timeline.filterCompletedAndCompactionInstants(), false);
         applyDeltaFileSlicesToPartitionView(partition, fileGroups, DeltaApplyMode.ADD);
       } else {
         LOG.warn("Skipping partition (" + partition + ") when syncing instant (" + instant + ") as it is not loaded");
@@ -381,7 +384,7 @@ public abstract class IncrementalTimelineSyncFileSystemView extends AbstractTabl
         return status;
       }).toArray(FileStatus[]::new);
       List<HoodieFileGroup> fileGroups =
-          buildFileGroups(statuses, timeline.filterCompletedAndCompactionInstants(), false);
+          buildFileGroups(partition, statuses, timeline.filterCompletedAndCompactionInstants(), false);
       applyDeltaFileSlicesToPartitionView(partition, fileGroups, DeltaApplyMode.REMOVE);
     } else {
       LOG.warn("Skipping partition (" + partition + ") when syncing instant (" + instant + ") as it is not loaded");
@@ -450,7 +453,7 @@ public abstract class IncrementalTimelineSyncFileSystemView extends AbstractTabl
 
     HoodieTimeline timeline = deltaFileGroups.stream().map(df -> df.getTimeline()).findAny().get();
     List<HoodieFileGroup> fgs =
-        buildFileGroups(viewDataFiles.values().stream(), viewLogFiles.values().stream(), timeline, true);
+        buildFileGroups(partition, viewDataFiles.values().stream(), viewLogFiles.values().stream(), timeline, true);
     storePartitionView(partition, fgs);
   }
 

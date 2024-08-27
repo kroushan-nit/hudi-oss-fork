@@ -139,6 +139,13 @@ public enum WriteOperationType {
         || operation == WriteOperationType.BOOTSTRAP;
   }
 
+  public static boolean canUpdateSchema(WriteOperationType operation) {
+    return !(operation == WriteOperationType.CLUSTER
+        || operation == WriteOperationType.COMPACT
+        || operation == WriteOperationType.INDEX
+        || operation == WriteOperationType.LOG_COMPACT);
+  }
+
   public static boolean isInsert(WriteOperationType operation) {
     return operation == WriteOperationType.INSERT
         || operation == WriteOperationType.INSERT_PREPPED
@@ -156,5 +163,9 @@ public enum WriteOperationType {
 
   public static boolean isDelete(WriteOperationType operation) {
     return operation == DELETE || operation == DELETE_PREPPED;
+  }
+
+  public static boolean isPreppedWriteOperation(WriteOperationType operationType) {
+    return operationType == BULK_INSERT_PREPPED || operationType == INSERT_PREPPED | operationType == UPSERT_PREPPED || operationType == DELETE_PREPPED;
   }
 }

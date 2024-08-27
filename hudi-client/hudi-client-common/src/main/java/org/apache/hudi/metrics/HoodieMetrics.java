@@ -21,6 +21,7 @@ package org.apache.hudi.metrics;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.VisibleForTesting;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -65,6 +66,7 @@ public class HoodieMetrics {
   public String finalizeTimerName = null;
   public String compactionTimerName = null;
   public String indexTimerName = null;
+  public String preWriteTimerName = null;
   private String conflictResolutionTimerName = null;
   private String conflictResolutionSuccessCounterName = null;
   private String conflictResolutionFailureCounterName = null;
@@ -81,6 +83,7 @@ public class HoodieMetrics {
   private Timer logCompactionTimer = null;
   private Timer clusteringTimer = null;
   private Timer indexTimer = null;
+  private Timer preWriteTimer = null;
   private Timer conflictResolutionTimer = null;
   private Counter conflictResolutionSuccessCounter = null;
   private Counter conflictResolutionFailureCounter = null;
@@ -91,7 +94,7 @@ public class HoodieMetrics {
     this.config = config;
     this.tableName = config.getTableName();
     if (config.isMetricsOn()) {
-      metrics = Metrics.getInstance(config);
+      metrics = Metrics.getInstance(config.getMetricsConfig());
       this.rollbackTimerName = getMetricsName("timer", HoodieTimeline.ROLLBACK_ACTION);
       this.cleanTimerName = getMetricsName("timer", HoodieTimeline.CLEAN_ACTION);
       this.commitTimerName = getMetricsName("timer", HoodieTimeline.COMMIT_ACTION);
@@ -101,6 +104,7 @@ public class HoodieMetrics {
       this.compactionTimerName = getMetricsName("timer", HoodieTimeline.COMPACTION_ACTION);
       this.logCompactionTimerName = getMetricsName("timer", HoodieTimeline.LOG_COMPACTION_ACTION);
       this.indexTimerName = getMetricsName("timer", "index");
+      this.preWriteTimerName = getMetricsName("timer", "pre_write");
       this.conflictResolutionTimerName = getMetricsName("timer", "conflict_resolution");
       this.conflictResolutionSuccessCounterName = getMetricsName("counter", "conflict_resolution.success");
       this.conflictResolutionFailureCounterName = getMetricsName("counter", "conflict_resolution.failure");
@@ -178,6 +182,13 @@ public class HoodieMetrics {
       indexTimer = createTimer(indexTimerName);
     }
     return indexTimer == null ? null : indexTimer.time();
+  }
+
+  public Timer.Context getPreWriteTimerCtx() {
+    if (config.isMetricsOn() && preWriteTimer == null) {
+      preWriteTimer = createTimer(preWriteTimerName);
+    }
+    return preWriteTimer == null ? null : preWriteTimer.time();
   }
 
   public Timer.Context getConflictResolutionCtx() {
@@ -300,9 +311,23 @@ public class HoodieMetrics {
     }
   }
 
+  public void updatePreWriteMetrics(final String action, final long durationInMs) {
+    if (config.isMetricsOn()) {
+      LOG.info(String.format("Sending preWrite metrics (%s.duration, %d)", action, durationInMs));
+      metrics.registerGauge(getMetricsName("pre_write", String.format("%s.duration", action)), durationInMs);
+    }
+  }
+
   @VisibleForTesting
   public String getMetricsName(String action, String metric) {
-    return config == null ? null : String.format("%s.%s.%s", config.getMetricReporterMetricsNamePrefix(), action, metric);
+    if (config == null) {
+      return null;
+    }
+    if (StringUtils.isNullOrEmpty(config.getMetricReporterMetricsNamePrefix())) {
+      return String.format("%s.%s", action, metric);
+    } else {
+      return String.format("%s.%s.%s", config.getMetricReporterMetricsNamePrefix(), action, metric);
+    }
   }
 
   public void updateClusteringFileCreationMetrics(long durationInMs) {
@@ -350,6 +375,22 @@ public class HoodieMetrics {
     if (config.isMetricsOn()) {
       compactionCompletedCounter = getCounter(compactionCompletedCounter, compactionCompletedCounterName);
       compactionCompletedCounter.inc();
+    }
+  }
+
+  public void emitMetadataEnablementMetrics(boolean isMetadataEnabled, boolean isMetadataColStatsEnabled, boolean isMetadataBloomFilterEnabled,
+                                            boolean isMetadataRliEnabled) {
+    if (config.isMetricsOn()) {
+      metrics.registerGauge(getMetricsName("metadata", "isEnabled"), isMetadataEnabled ? 1 : 0);
+      metrics.registerGauge(getMetricsName("metadata", "isColSatsEnabled"), isMetadataColStatsEnabled ? 1 : 0);
+      metrics.registerGauge(getMetricsName("metadata", "isBloomFilterEnabled"), isMetadataBloomFilterEnabled ? 1 : 0);
+      metrics.registerGauge(getMetricsName("metadata", "isRliEnabled"), isMetadataRliEnabled ? 1 : 0);
+    }
+  }
+
+  public void emitIndexTypeMetrics(int indexTypeOrdinal) {
+    if (config.isMetricsOn()) {
+      metrics.registerGauge(getMetricsName("index", "type"), indexTypeOrdinal);
     }
   }
 

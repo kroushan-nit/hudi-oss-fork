@@ -27,10 +27,9 @@ import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.fs.FSUtils;
-import org.apache.hudi.common.metrics.Registry;
 import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.model.HoodieRecordGlobalLocation;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
@@ -39,6 +38,7 @@ import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.common.util.hash.ColumnIndexID;
 import org.apache.hudi.common.util.hash.FileIndexID;
 import org.apache.hudi.common.util.hash.PartitionIndexID;
+import org.apache.hudi.config.metrics.HoodieMetricsConfig;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieMetadataException;
 
@@ -97,7 +97,7 @@ public abstract class BaseTableMetadata extends AbstractHoodieTableMetadata {
     this.isMetadataTableInitialized = dataMetaClient.getTableConfig().isMetadataTableAvailable();
 
     if (metadataConfig.enableMetrics()) {
-      this.metrics = Option.of(new HoodieMetadataMetrics(Registry.getRegistry("HoodieMetadata")));
+      this.metrics = Option.of(new HoodieMetadataMetrics(HoodieMetricsConfig.newBuilder().fromProperties(metadataConfig.getProps()).build()));
     } else {
       this.metrics = Option.empty();
     }
@@ -197,7 +197,7 @@ public abstract class BaseTableMetadata extends AbstractHoodieTableMetadata {
     Map<String, Pair<String, String>> fileToKeyMap = new HashMap<>();
     partitionNameFileNameList.forEach(partitionNameFileNamePair -> {
       final String bloomFilterIndexKey = HoodieMetadataPayload.getBloomFilterIndexKey(
-          new PartitionIndexID(partitionNameFileNamePair.getLeft()), new FileIndexID(partitionNameFileNamePair.getRight()));
+          new PartitionIndexID(HoodieTableMetadataUtil.getBloomFilterIndexPartitionIdentifier(partitionNameFileNamePair.getLeft())), new FileIndexID(partitionNameFileNamePair.getRight()));
       partitionIDFileIDStrings.add(bloomFilterIndexKey);
       fileToKeyMap.put(bloomFilterIndexKey, partitionNameFileNamePair);
     });
@@ -245,7 +245,7 @@ public abstract class BaseTableMetadata extends AbstractHoodieTableMetadata {
     final ColumnIndexID columnIndexID = new ColumnIndexID(columnName);
     for (Pair<String, String> partitionNameFileNamePair : partitionNameFileNameList) {
       final String columnStatsIndexKey = HoodieMetadataPayload.getColumnStatsIndexKey(
-          new PartitionIndexID(partitionNameFileNamePair.getLeft()),
+          new PartitionIndexID(HoodieTableMetadataUtil.getColumnStatsIndexPartitionIdentifier(partitionNameFileNamePair.getLeft())),
           new FileIndexID(partitionNameFileNamePair.getRight()),
           columnIndexID);
       columnStatKeyset.add(columnStatsIndexKey);
@@ -331,7 +331,7 @@ public abstract class BaseTableMetadata extends AbstractHoodieTableMetadata {
     })
         .orElse(Collections.emptyList());
 
-    LOG.info("Listed partitions from metadata: #partitions=" + partitions.size());
+    LOG.info("Listed partitions from metadata: #partitions={}", partitions.size());
     return partitions;
   }
 
@@ -358,9 +358,9 @@ public abstract class BaseTableMetadata extends AbstractHoodieTableMetadata {
         throw new HoodieIOException("Failed to extract file-statuses from the payload", e);
       }
     })
-        .orElse(new FileStatus[0]);
+        .orElseGet(() -> new FileStatus[0]);
 
-    LOG.info("Listed file in partition from metadata: partition=" + relativePartitionPath + ", #files=" + statuses.length);
+    LOG.debug("Listed file in partition from metadata: partition={}, #files={}", relativePartitionPath, statuses.length);
     return statuses;
   }
 
@@ -394,7 +394,7 @@ public abstract class BaseTableMetadata extends AbstractHoodieTableMetadata {
         })
         .collect(Collectors.toMap(Pair::getKey, Pair::getValue));
 
-    LOG.info("Listed files in " + partitionPaths.size() + " partitions from metadata");
+    LOG.info("Listed files in {} partitions from metadata", partitionPaths.size());
 
     return partitionPathToFilesMap;
   }

@@ -41,17 +41,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.util.MapUtils.nonEmpty;
+import static org.apache.hudi.table.action.clean.CleanPlanner.EARLIEST_COMMIT_TO_NOT_ARCHIVE;
+import static org.apache.hudi.table.action.clean.CleanPlanner.SAVEPOINTED_TIMESTAMPS;
 
 public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K, O, Option<HoodieCleanerPlan>> {
 
   private static final Logger LOG = LoggerFactory.getLogger(CleanPlanActionExecutor.class);
-
   private final Option<Map<String, String>> extraMetadata;
 
   public CleanPlanActionExecutor(HoodieEngineContext context,
@@ -118,25 +121,52 @@ public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
 
       context.setJobStatus(this.getClass().getSimpleName(), "Generating list of file slices to be cleaned: " + config.getTableName());
 
-      Map<String, Pair<Boolean, List<CleanFileInfo>>> cleanOpsWithPartitionMeta = context
-          .map(partitionsToClean, partitionPathToClean -> Pair.of(partitionPathToClean, planner.getDeletePaths(partitionPathToClean, earliestInstant)), cleanerParallelism)
-          .stream()
-          .collect(Collectors.toMap(Pair::getKey, Pair::getValue));
+      Map<String, List<HoodieCleanFileInfo>> cleanOps = new HashMap<>();
+      List<String> partitionsToDelete = new ArrayList<>();
+      boolean shouldUseBatchLookup = table.getMetaClient().getTableConfig().isMetadataTableAvailable();
+      for (int i = 0; i < partitionsToClean.size(); i += cleanerParallelism) {
+        // Handles at most 'cleanerParallelism' number of partitions once at a time to avoid overlarge memory pressure to the timeline server
+        // (remote or local embedded), thus to reduce the risk of an OOM exception.
+        List<String> subPartitionsToClean = partitionsToClean.subList(i, Math.min(i + cleanerParallelism, partitionsToClean.size()));
+        // load partitions in advance if necessary.
+        if (shouldUseBatchLookup) {
+          LOG.info("Load partitions and files into file system view in advance. Paths: {}", subPartitionsToClean);
+          table.getHoodieView().loadPartitions(subPartitionsToClean);
+        }
+        Map<String, Pair<Boolean, List<CleanFileInfo>>> cleanOpsWithPartitionMeta = context
+            .map(subPartitionsToClean, partitionPathToClean -> Pair.of(partitionPathToClean, planner.getDeletePaths(partitionPathToClean, earliestInstant)), cleanerParallelism)
+            .stream()
+            .collect(Collectors.toMap(Pair::getKey, Pair::getValue));
 
-      Map<String, List<HoodieCleanFileInfo>> cleanOps = cleanOpsWithPartitionMeta.entrySet().stream()
-          .collect(Collectors.toMap(Map.Entry::getKey,
-              e -> CleanerUtils.convertToHoodieCleanFileInfoList(e.getValue().getValue())));
+        cleanOps.putAll(cleanOpsWithPartitionMeta.entrySet().stream()
+            .collect(Collectors.toMap(Map.Entry::getKey, e -> CleanerUtils.convertToHoodieCleanFileInfoList(e.getValue().getValue()))));
 
-      List<String> partitionsToDelete = cleanOpsWithPartitionMeta.entrySet().stream().filter(entry -> entry.getValue().getKey()).map(Map.Entry::getKey)
-          .collect(Collectors.toList());
+        partitionsToDelete.addAll(cleanOpsWithPartitionMeta.entrySet().stream().filter(entry -> entry.getValue().getKey()).map(Map.Entry::getKey)
+            .collect(Collectors.toList()));
+      }
 
       return new HoodieCleanerPlan(earliestInstant
           .map(x -> new HoodieActionInstant(x.getTimestamp(), x.getAction(), x.getState().name())).orElse(null),
           planner.getLastCompletedCommitTimestamp(),
           config.getCleanerPolicy().name(), Collections.emptyMap(),
-          CleanPlanner.LATEST_CLEAN_PLAN_VERSION, cleanOps, partitionsToDelete);
+          CleanPlanner.LATEST_CLEAN_PLAN_VERSION, cleanOps, partitionsToDelete, prepareExtraMetadata(planner.getSavepointedTimestamps(), planner.getEarliestCommitToNotArchive()));
     } catch (IOException e) {
       throw new HoodieIOException("Failed to schedule clean operation", e);
+    }
+  }
+
+  private Map<String, String> prepareExtraMetadata(List<String> savepointedTimestamps, Option<String> earliestCommitToNotArchive) {
+    if (savepointedTimestamps.isEmpty() && !earliestCommitToNotArchive.isPresent()) {
+      return Collections.emptyMap();
+    } else {
+      Map<String, String> extraMetadata = new HashMap<>();
+      if (!savepointedTimestamps.isEmpty()) {
+        extraMetadata.put(SAVEPOINTED_TIMESTAMPS, savepointedTimestamps.stream().collect(Collectors.joining(",")));
+      }
+      if (earliestCommitToNotArchive.isPresent()) {
+        extraMetadata.put(EARLIEST_COMMIT_TO_NOT_ARCHIVE, earliestCommitToNotArchive.get());
+      }
+      return extraMetadata;
     }
   }
 

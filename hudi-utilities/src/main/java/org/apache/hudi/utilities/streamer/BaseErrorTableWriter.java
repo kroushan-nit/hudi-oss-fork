@@ -19,15 +19,19 @@
 
 package org.apache.hudi.utilities.streamer;
 
+import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.VisibleForTesting;
+import org.apache.hudi.utilities.ingestion.HoodieIngestionMetrics;
 
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.sql.SparkSession;
+
+import java.io.Serializable;
 
 /**
  * The class which handles error events while processing write records. All the
@@ -38,7 +42,7 @@ import org.apache.spark.sql.SparkSession;
  *
  * The writer can use the configs defined in HoodieErrorTableConfig to manage the error table.
  */
-public abstract class BaseErrorTableWriter<T extends ErrorEvent> {
+public abstract class BaseErrorTableWriter<T extends ErrorEvent> implements Serializable {
 
   // The column name passed to Spark for option `columnNameOfCorruptRecord`. The record
   // is set to this column in case of an error
@@ -46,6 +50,14 @@ public abstract class BaseErrorTableWriter<T extends ErrorEvent> {
 
   public BaseErrorTableWriter(HoodieStreamer.Config cfg, SparkSession sparkSession,
                                    TypedProperties props, HoodieSparkEngineContext hoodieSparkContext, FileSystem fs) {
+  }
+
+  public BaseErrorTableWriter(HoodieStreamer.Config cfg,
+                              SparkSession sparkSession,
+                              TypedProperties props,
+                              HoodieSparkEngineContext hoodieSparkContext,
+                              FileSystem fs,
+                              Option<HoodieIngestionMetrics> metrics) {
   }
 
   /**
@@ -68,4 +80,7 @@ public abstract class BaseErrorTableWriter<T extends ErrorEvent> {
    */
   public abstract boolean upsertAndCommit(String baseTableInstantTime, Option<String> commitedInstantTime);
 
+  public abstract JavaRDD<WriteStatus> upsert(String errorTableInstantTime, String baseTableInstantTime, Option<String> commitedInstantTime);
+
+  public abstract boolean commit(String errorTableInstantTime, JavaRDD<WriteStatus> writeStatuses);
 }

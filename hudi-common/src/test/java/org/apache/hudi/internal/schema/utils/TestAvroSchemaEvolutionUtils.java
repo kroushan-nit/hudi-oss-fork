@@ -19,6 +19,8 @@
 package org.apache.hudi.internal.schema.utils;
 
 import org.apache.hudi.avro.HoodieAvroUtils;
+import org.apache.hudi.common.testutils.SchemaTestUtil;
+import org.apache.hudi.exception.HoodieNullSchemaTypeException;
 import org.apache.hudi.internal.schema.InternalSchema;
 import org.apache.hudi.internal.schema.InternalSchemaBuilder;
 import org.apache.hudi.internal.schema.Type;
@@ -44,6 +46,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Tests {@link AvroSchemaEvolutionUtils}.
@@ -147,9 +152,9 @@ public class TestAvroSchemaEvolutionUtils {
 
   @Test
   public void testArrayType() {
-    Type arrayNestRecordType = Types.ArrayType.get(1, false,
-        Types.RecordType.get(Arrays.asList(Types.Field.get(2, false, "a", Types.FloatType.get()),
-            Types.Field.get(3, false, "b", Types.FloatType.get()))));
+    Type arrayNestRecordType = Types.ArrayType.get(0, false,
+        Types.RecordType.get(Arrays.asList(Types.Field.get(1, false, "a", Types.FloatType.get()),
+            Types.Field.get(2, false, "b", Types.FloatType.get()))));
 
     Schema schema = SchemaBuilder.array().items(create("t1",
         new Schema.Field("a", Schema.create(Schema.Type.FLOAT), null, null),
@@ -184,6 +189,37 @@ public class TestAvroSchemaEvolutionUtils {
   }
 
   @Test
+  public void testNullFieldType() {
+    Schema schema = create("t1",
+        new Schema.Field("nullField", Schema.create(Schema.Type.NULL), null, JsonProperties.NULL_VALUE));
+    Throwable t = assertThrows(HoodieNullSchemaTypeException.class,
+        () -> AvroInternalSchemaConverter.convert(schema));
+    assertTrue(t.getMessage().contains("'t1.nullField'"));
+
+    Schema schemaArray = create("t2",
+        new Schema.Field("nullArray", Schema.createArray(Schema.create(Schema.Type.NULL)), null, null));
+    t = assertThrows(HoodieNullSchemaTypeException.class,
+        () -> AvroInternalSchemaConverter.convert(schemaArray));
+    assertTrue(t.getMessage().contains("'t2.nullArray.element'"));
+
+    Schema schemaMap = create("t3",
+        new Schema.Field("nullMap", Schema.createMap(Schema.create(Schema.Type.NULL)), null, null));
+    t = assertThrows(HoodieNullSchemaTypeException.class,
+        () -> AvroInternalSchemaConverter.convert(schemaMap));
+    assertTrue(t.getMessage().contains("'t3.nullMap.value'"));
+
+
+    Schema schemaComplex = create("t4",
+        new Schema.Field("complexField", Schema.createMap(
+            create("nestedStruct",
+                new Schema.Field("nestedArray", Schema.createArray(Schema.createMap(Schema.create(Schema.Type.NULL))),
+                    null, null))), null, null));
+    t = assertThrows(HoodieNullSchemaTypeException.class,
+        () -> AvroInternalSchemaConverter.convert(schemaComplex));
+    assertTrue(t.getMessage().contains("'t4.nestedStruct.nestedArray.element.value'"));
+  }
+
+  @Test
   public void testRefreshNewId() {
     Types.RecordType record = Types.RecordType.get(Types.Field.get(0, false, "id", Types.IntType.get()),
         Types.Field.get(1, true, "data", Types.StringType.get()),
@@ -205,6 +241,20 @@ public class TestAvroSchemaEvolutionUtils {
             Types.RecordType.get(Types.Field.get(108, false, "lat", Types.FloatType.get()), Types.Field.get(109, false, "long", Types.FloatType.get())), false))
     );
     Assertions.assertEquals(newRecord, recordWithNewId);
+  }
+
+  @Test
+  public void testFixNullOrdering() {
+    Schema schema = SchemaTestUtil.getSchemaFromResource(TestAvroSchemaEvolutionUtils.class, "/nullWrong.avsc");
+    Schema expectedSchema = SchemaTestUtil.getSchemaFromResource(TestAvroSchemaEvolutionUtils.class, "/nullRight.avsc");
+    Assertions.assertEquals(expectedSchema, AvroInternalSchemaConverter.fixNullOrdering(schema));
+    Assertions.assertEquals(expectedSchema, AvroInternalSchemaConverter.fixNullOrdering(expectedSchema));
+  }
+
+  @Test
+  public void testFixNullOrderingSameSchemaCheck() {
+    Schema schema = SchemaTestUtil.getSchemaFromResource(TestAvroSchemaEvolutionUtils.class, "/source_evolved.avsc");
+    Assertions.assertEquals(schema, AvroInternalSchemaConverter.fixNullOrdering(schema));
   }
 
   public enum Enum {
@@ -430,7 +480,7 @@ public class TestAvroSchemaEvolutionUtils {
     );
     evolvedRecord = (Types.RecordType)InternalSchemaBuilder.getBuilder().refreshNewId(evolvedRecord, new AtomicInteger(0));
     Schema evolvedAvroSchema = AvroInternalSchemaConverter.convert(evolvedRecord, "test1");
-    InternalSchema result = AvroSchemaEvolutionUtils.reconcileSchema(evolvedAvroSchema, oldSchema);
+    InternalSchema result = AvroSchemaEvolutionUtils.reconcileSchema(evolvedAvroSchema, oldSchema, false);
     Types.RecordType checkedRecord = Types.RecordType.get(
         Types.Field.get(0, false, "id", Types.IntType.get()),
         Types.Field.get(1, true, "data", Types.StringType.get()),
@@ -456,6 +506,32 @@ public class TestAvroSchemaEvolutionUtils {
   }
 
   @Test
+  void testEvolutionSchemaNonNullableColumnDrop() {
+    Types.RecordType oldRecord = Types.RecordType.get(
+        Types.Field.get(0, false, "id", Types.IntType.get()),
+        Types.Field.get(1, true, "data", Types.StringType.get()),
+        Types.Field.get(2, false, "data2", Types.StringType.get())
+    );
+    InternalSchema oldSchema = new InternalSchema(oldRecord);
+    Types.RecordType evolvedRecord = Types.RecordType.get(
+        Types.Field.get(0, false, "id", Types.IntType.get()),
+        Types.Field.get(1, true, "data", Types.StringType.get()),
+        Types.Field.get(3, true, "data3", Types.StringType.get())
+    );
+    evolvedRecord = (Types.RecordType)InternalSchemaBuilder.getBuilder().refreshNewId(evolvedRecord, new AtomicInteger(0));
+    Schema evolvedAvroSchema = AvroInternalSchemaConverter.convert(evolvedRecord, "test1");
+    InternalSchema result = AvroSchemaEvolutionUtils.reconcileSchema(evolvedAvroSchema, oldSchema, true);
+    Types.RecordType checkedRecord = Types.RecordType.get(
+        Types.Field.get(0, false, "id", Types.IntType.get()),
+        Types.Field.get(1, true, "data", Types.StringType.get()),
+        Types.Field.get(2, true, "data2", Types.StringType.get()),
+        Types.Field.get(3, true, "data3", Types.StringType.get())
+
+    );
+    Assertions.assertEquals(result.getRecord(), checkedRecord);
+  }
+
+  @Test
   public void testReconcileSchema() {
     // simple schema test
     // a: boolean, b: int, c: long, d: date
@@ -476,15 +552,16 @@ public class TestAvroSchemaEvolutionUtils {
         new Schema.Field("d2", AvroInternalSchemaConverter.nullableSchema(LogicalTypes.date().addToSchema(Schema.create(Schema.Type.INT))), null, JsonProperties.NULL_VALUE));
 
     Schema simpleCheckSchema = new Schema.Parser().parse("{\"type\":\"record\",\"name\":\"simple\",\"fields\":[{\"name\":\"a\",\"type\":[\"null\",\"boolean\"],\"default\":null},"
-        + "{\"name\":\"b\",\"type\":[\"null\",\"int\"],\"default\":null},{\"name\":\"a1\",\"type\":[\"null\",\"long\"],\"default\":null},"
+        + "{\"name\":\"b\",\"type\":[\"null\",\"int\"],\"default\":null},"
         + "{\"name\":\"c\",\"type\":[\"null\",\"long\"],\"default\":null},"
-        + "{\"name\":\"c1\",\"type\":[\"null\",\"long\"],\"default\":null},{\"name\":\"c2\",\"type\":[\"null\",\"long\"],\"default\":null},"
         + "{\"name\":\"d\",\"type\":[\"null\",{\"type\":\"int\",\"logicalType\":\"date\"}],\"default\":null},"
+        + "{\"name\":\"a1\",\"type\":[\"null\",\"long\"],\"default\":null},"
+        + "{\"name\":\"c1\",\"type\":[\"null\",\"long\"],\"default\":null},{\"name\":\"c2\",\"type\":[\"null\",\"long\"],\"default\":null},"
         + "{\"name\":\"d1\",\"type\":[\"null\",{\"type\":\"int\",\"logicalType\":\"date\"}],\"default\":null},"
         + "{\"name\":\"d2\",\"type\":[\"null\",{\"type\":\"int\",\"logicalType\":\"date\"}],\"default\":null}]}");
 
     Schema simpleReconcileSchema = AvroInternalSchemaConverter.convert(AvroSchemaEvolutionUtils
-        .reconcileSchema(incomingSchema, AvroInternalSchemaConverter.convert(schema)), "schemaNameFallback");
-    Assertions.assertEquals(simpleReconcileSchema, simpleCheckSchema);
+        .reconcileSchema(incomingSchema, AvroInternalSchemaConverter.convert(schema), false), "schemaNameFallback");
+    Assertions.assertEquals(simpleCheckSchema, simpleReconcileSchema);
   }
 }
