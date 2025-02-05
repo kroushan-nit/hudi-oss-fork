@@ -616,12 +616,16 @@ public class KafkaOffsetGen {
       // Using default api timeout
       DescribeConfigsResult configsResult = client.describeConfigs(Collections.singleton(configResource));
       Config topicConfigs = configsResult.all().get().get(configResource);
-      // Not using Optional here as RETENTION_MS_CONFIG should always be present
-      ConfigEntry retentionMsConfig =
-          topicConfigs.entries().stream()
+      // RETENTION_MS_CONFIG should always be present, but still using Optional to avoid Sonar warnings
+      Option<ConfigEntry> retentionConfigs =
+          Option.fromJavaOptional(topicConfigs.entries().stream()
               .filter(cfgEntry -> cfgEntry.name().equals(TopicConfig.RETENTION_MS_CONFIG))
-              .findFirst().get();
-      return Long.parseLong(retentionMsConfig.value());
+              .findFirst());
+      if (!retentionConfigs.isPresent()) {
+        LOG.info("{} config missing for topic {}", TopicConfig.RETENTION_MS_CONFIG, topicName);
+        return null;
+      }
+      return Long.parseLong(retentionConfigs.get().value());
     } catch (KafkaException | ExecutionException e) {
       LOG.error("Error getting retention config for topic {}", topicName, e);
       return null;
