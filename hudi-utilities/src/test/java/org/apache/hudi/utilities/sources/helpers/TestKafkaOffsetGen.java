@@ -30,13 +30,18 @@ import org.apache.hudi.utilities.testutils.UtilitiesTestBase.Helpers;
 import org.apache.hudi.utilities.util.LogicalClock;
 import org.apache.hudi.utilities.util.SystemClock;
 
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.Config;
+import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.clients.admin.DescribeConfigsResult;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
-import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.spark.streaming.kafka010.KafkaTestUtils;
 import org.apache.spark.streaming.kafka010.OffsetRange;
@@ -47,6 +52,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.MockedStatic;
 
 import java.time.Instant;
 import java.util.Arrays;
@@ -71,6 +77,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -397,16 +404,41 @@ public class TestKafkaOffsetGen {
     }
   }
 
+  static Stream<Arguments> getNullRetentionMsTopicConfigTestArgs() {
+    return Stream.of(
+        // RETENTION_MS is null
+        Arguments.of(
+            new Config(Collections.singletonList(new ConfigEntry(TopicConfig.RETENTION_MS_CONFIG, null)))),
+        // RETENTION_MS is not present
+        Arguments.of(
+            new Config(Collections.singletonList(new ConfigEntry(TopicConfig.RETENTION_BYTES_CONFIG, "1024")))));
+  }
+
+  @ParameterizedTest
+  @MethodSource("getNullRetentionMsTopicConfigTestArgs")
+  void testGetTopicRetentionMs_retentionMsConfigIsNullOrNotSet(Config topicConfig) {
+    KafkaOffsetGen kafkaOffsetGen = new KafkaOffsetGen(getConsumerConfigs("earliest", "string"));
+    try (MockedStatic<AdminClient> staticMock = mockStatic(AdminClient.class)) {
+      mockDescribeTopicConfigs(staticMock, kafkaOffsetGen.getKafkaParams(), topicConfig);
+
+      Long topicRetentionMs = kafkaOffsetGen.getTopicRetentionMs(testTopicName);
+      assertNull(topicRetentionMs);
+    }
+  }
+
   @Test
   void testGetTopicRetentionMs_Failure() {
-    TypedProperties consumerConfigs = getConsumerConfigs("earliest", "string");
-    consumerConfigs.remove("bootstrap.servers");
-    KafkaOffsetGen kafkaOffsetGen = new KafkaOffsetGen(consumerConfigs);
-    testUtils.createTopic(testTopicName, 1);
-    // AdminClient creation will fail because "bootstrap.servers" is not set
-    // but no error will be thrown rather null retentionMs will be returned
-    Long topicRetentionMs = kafkaOffsetGen.getTopicRetentionMs(testTopicName);
-    assertNull(topicRetentionMs);
+    // In case of KafkaException, retentionMs will be null
+    KafkaOffsetGen kafkaOffsetGen = new KafkaOffsetGen(getConsumerConfigs("earliest", "string"));
+    try (MockedStatic<AdminClient> staticMock = mockStatic(AdminClient.class)) {
+      AdminClient mock = mock(AdminClient.class);
+      staticMock.when(() -> AdminClient.create(kafkaOffsetGen.getKafkaParams())).thenReturn(mock);
+      ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, testTopicName);
+      when(mock.describeConfigs(Collections.singleton(resource))).thenThrow(new KafkaException("something went wrong"));
+
+      Long topicRetentionMs = kafkaOffsetGen.getTopicRetentionMs(testTopicName);
+      assertNull(topicRetentionMs);
+    }
   }
 
   @Test
@@ -422,20 +454,23 @@ public class TestKafkaOffsetGen {
 
   @Test
   void testResolveFromOffsetsWithRetention_topicRetentionMsNotSet() {
-    Properties props = new Properties();
-    props.put(TopicConfig.RETENTION_MS_CONFIG, "-1");
-    testUtils.createTopic(testTopicName, 1, props);
-
     KafkaConsumer mockConsumer = mock(KafkaConsumer.class);
     Map<TopicPartition, Long> fromOffsets = KafkaOffsetGen.CheckpointUtils.strToOffsets(String.format("%s,0:10,1:23", testTopicName));
+
     TypedProperties consumerConfigs = getConsumerConfigs("earliest", "string");
     consumerConfigs.put(KafkaSourceConfig.OFFSET_SKIP_BUFFER_MINUTES.key(), "30");
     KafkaOffsetGen kafkaOffsetGen = new KafkaOffsetGen(consumerConfigs);
 
-    Map<TopicPartition, Long> offsets =
-        kafkaOffsetGen.resolveFromOffsetsWithRetention(mockConsumer, new HashMap<>(fromOffsets), Collections.emptySet());
-    assertEquals(fromOffsets, offsets);
-    verify(mockConsumer, never()).offsetsForTimes(any());
+    try (MockedStatic<AdminClient> staticMock = mockStatic(AdminClient.class)) {
+      mockDescribeTopicConfigs(staticMock, kafkaOffsetGen.getKafkaParams(), new Config(Collections.emptyList()));
+
+      Map<TopicPartition, Long> offsets =
+          kafkaOffsetGen.resolveFromOffsetsWithRetention(mockConsumer, new HashMap<>(fromOffsets), Collections.emptySet());
+      assertEquals(fromOffsets, offsets);
+      verify(mockConsumer, never()).offsetsForTimes(any());
+      Long topicRetentionMs = kafkaOffsetGen.getTopicRetentionMs(testTopicName);
+      assertNull(topicRetentionMs);
+    }
   }
 
   @Test
@@ -448,12 +483,7 @@ public class TestKafkaOffsetGen {
     Map<TopicPartition, Long> topicPartitionsTimestamp = fromOffsets.entrySet().stream()
         .collect(Collectors.toMap(Map.Entry::getKey, entry -> retentionTs));
 
-    // Create topic with retention of 2 hours
-    Properties props = new Properties();
-    props.put(TopicConfig.RETENTION_MS_CONFIG, String.valueOf(retentionMs));
-    testUtils.createTopic(testTopicName, 1, props);
-
-    // setup mocks
+    // setup KafkaConsumer mocks
     KafkaConsumer mockConsumer = mock(KafkaConsumer.class);
     LogicalClock mockClock = mock(SystemClock.class);
     when(mockConsumer.offsetsForTimes(topicPartitionsTimestamp)).thenThrow(new KafkaException("something went wrong"));
@@ -463,12 +493,16 @@ public class TestKafkaOffsetGen {
     consumerConfigs.put(KafkaSourceConfig.OFFSET_SKIP_BUFFER_MINUTES.key(), String.valueOf(offsetSkipIntervalMinutes));
     KafkaOffsetGen kafkaOffsetGen = new KafkaOffsetGen(consumerConfigs, mockClock);
 
-    Map<TopicPartition, Long> offsets =
-        kafkaOffsetGen.resolveFromOffsetsWithRetention(mockConsumer, new HashMap<>(fromOffsets), fromOffsets.keySet());
+    try (MockedStatic<AdminClient> staticMock = mockStatic(AdminClient.class)) {
+      Config topicConfig = new Config(Collections.singletonList(new ConfigEntry(TopicConfig.RETENTION_MS_CONFIG, String.valueOf(retentionMs))));
+      mockDescribeTopicConfigs(staticMock, kafkaOffsetGen.getKafkaParams(), topicConfig);
 
-    assertEquals(fromOffsets, offsets);
-    verify(mockConsumer, times(1)).offsetsForTimes(topicPartitionsTimestamp);
-    verify(mockClock, times(1)).currentEpoch();
+      Map<TopicPartition, Long> offsets =
+          kafkaOffsetGen.resolveFromOffsetsWithRetention(mockConsumer, new HashMap<>(fromOffsets), fromOffsets.keySet());
+      assertEquals(fromOffsets, offsets);
+      verify(mockConsumer, times(1)).offsetsForTimes(topicPartitionsTimestamp);
+      verify(mockClock, times(1)).currentEpoch();
+    }
   }
 
   static Stream<Arguments> resolveEarliestOffsetsWithRetentionTestArgs() {
@@ -523,13 +557,6 @@ public class TestKafkaOffsetGen {
     long retentionMs = 7200000;
     long skipOffsetBufferMinutes = 30;
     long currentEpochMillis = Instant.now().toEpochMilli();
-    Properties props = new Properties();
-    props.put(TopicConfig.RETENTION_MS_CONFIG, String.valueOf(retentionMs));
-    try {
-      testUtils.createTopic(topicName, 1, props);
-    } catch (TopicExistsException ignore) {
-      // ignore topic exists exception as we just need topic config and not the messages
-    }
 
     long retentionTs = currentEpochMillis - retentionMs + TimeUnit.MINUTES.toMillis(skipOffsetBufferMinutes);
     KafkaConsumer mockConsumer = mock(KafkaConsumer.class);
@@ -547,9 +574,30 @@ public class TestKafkaOffsetGen {
     when(mockConsumer.offsetsForTimes(topicPartitionsTimestamp)).thenReturn(offsetAndTimestamp);
     when(mockClock.currentEpoch()).thenReturn(currentEpochMillis);
 
-    Map<TopicPartition, Long> offsets = kafkaOffsetGen.resolveFromOffsetsWithRetention(mockConsumer, fromOffsets, new HashSet<>(topicPartitions));
-    assertEquals(expectedOffsets, offsets);
-    verify(mockClock, times(1)).currentEpoch();
-    verify(mockConsumer, times(1)).offsetsForTimes(topicPartitionsTimestamp);
+    try (MockedStatic<AdminClient> staticMock = mockStatic(AdminClient.class)) {
+      Config topicConfig = new Config(Collections.singletonList(new ConfigEntry(TopicConfig.RETENTION_MS_CONFIG, String.valueOf(retentionMs))));
+      mockDescribeTopicConfigs(staticMock, kafkaOffsetGen.getKafkaParams(), topicConfig, topicName);
+
+      Map<TopicPartition, Long> offsets = kafkaOffsetGen.resolveFromOffsetsWithRetention(mockConsumer, fromOffsets, new HashSet<>(topicPartitions));
+      assertEquals(expectedOffsets, offsets);
+      verify(mockClock, times(1)).currentEpoch();
+      verify(mockConsumer, times(1)).offsetsForTimes(topicPartitionsTimestamp);
+    }
+  }
+
+  void mockDescribeTopicConfigs(MockedStatic<AdminClient> staticMock, Map kafkaParams, Config topicConfig) {
+    mockDescribeTopicConfigs(staticMock, kafkaParams, topicConfig, testTopicName);
+  }
+
+  void mockDescribeTopicConfigs(MockedStatic<AdminClient> staticMock, Map kafkaParams, Config topicConfig, String topicName) {
+    AdminClient mock = mock(AdminClient.class);
+    staticMock.when(() -> AdminClient.create(kafkaParams)).thenReturn(mock);
+
+    ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
+    DescribeConfigsResult mockResult = mock(DescribeConfigsResult.class);
+    KafkaFuture<Map<ConfigResource, Config>> future = KafkaFuture.completedFuture(Collections.singletonMap(resource, topicConfig));
+
+    when(mock.describeConfigs(Collections.singleton(resource))).thenReturn(mockResult);
+    when(mockResult.all()).thenReturn(future);
   }
 }
